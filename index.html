@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Smart Financial Analyzer | محلل مالي ذكي</title>
+<title>MangoPilot | مانجو بايلوت</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&family=Cairo:wght@300;400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
@@ -17,11 +18,21 @@
 <!-- HEADER -->
 <header class="hdr">
   <div class="hdr-inner">
-    <div class="logo">
-      <div class="logo-icon">📊</div>
-      <span class="logo-en">Smart Financial Analyzer</span>
-      <span class="logo-ar">المحلل المالي الذكي</span>
-    </div>
+    <a class="logo" href="/" aria-label="MangoPilot — back to home"
+       onclick="var w=document.getElementById('welcomeScreen');if(w&&w.classList.contains('hidden')){backToChat();return false;}">
+      <div class="logo-icon">
+        <svg viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs><linearGradient id="mgLogo" x1="4" y1="3" x2="36" y2="37" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#fcd34d"/><stop offset=".55" stop-color="#fb923c"/><stop offset="1" stop-color="#f43f5e"/>
+          </linearGradient></defs>
+          <rect width="40" height="40" rx="11" fill="url(#mgLogo)"/>
+          <ellipse cx="19.5" cy="22" rx="8.6" ry="10.8" transform="rotate(-22 19.5 22)" fill="#fff" fill-opacity=".95"/>
+          <path d="M24.4 11.8c1.6-2.7 4.6-4.1 7.4-3.8.2 2.9-1.4 5.9-4.2 7.2-1.7.8-3.2.4-3.7-.7-.4-1 0-1.8.5-2.7Z" fill="#22c55e"/>
+        </svg>
+      </div>
+      <span class="logo-en">MangoPilot</span>
+      <span class="logo-ar">مانجو بايلوت</span>
+    </a>
 
     <div class="hdr-center">
       <div class="hdr-search-wrap">
@@ -122,7 +133,7 @@
       <div id="welcomeScreen">
         <div class="welcome" id="uploadWelcome">
           <div class="welcome-eyebrow">☁️ <span id="eyebrowTxt">Cloud-Powered Financial Analysis</span></div>
-          <h1 id="welcomeH1">Smart Financial<br>Analyzer</h1>
+          <h1 id="welcomeH1">MangoPilot</h1>
           <p id="welcomeP">Loading financial data from cloud database...</p>
           <div style="margin-top:24px"><div class="loader"><div class="spin"></div><span class="loader-txt">Connecting to Supabase...</span></div></div>
           <div class="how-grid" style="margin-top:36px">
