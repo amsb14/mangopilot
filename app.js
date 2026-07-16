@@ -7809,6 +7809,123 @@ function mergeTickerLocally(item) {
   if (!TICKERS.includes(t)) TICKERS.push(t);
 }
 
+// ── BULK CLOUD REFRESH ────────────────────────────────────────────────────────
+// Owner action: re-sync ALL companies' financials (annual + QUARTERLY + profile +
+// estimates) from FMP into Supabase via the sync-ticker edge function, 10 at a time.
+// Unlike syncNewTickers (which skips tickers already in the universe), this
+// intentionally re-syncs existing tickers so their quarterly data is refreshed.
+let _bulkRefreshAbort = false;
+
+async function refreshAllCloudData() {
+  if (!isAiReady()) { showPinModal(); return; }
+  const all = [...TICKERS].sort();
+  if (!all.length) { alert(lang === 'ar' ? 'لا توجد شركات محمّلة بعد.' : 'No companies loaded yet.'); return; }
+
+  const BATCH = 10; // sync-ticker caps at 10/call to fit Supabase's 50s edge timeout
+  const totalBatches = Math.ceil(all.length / BATCH);
+  const estMin = Math.max(1, Math.round(totalBatches * 30 / 60)); // ~30s per batch
+
+  const go = confirm(lang === 'ar'
+    ? `تحديث البيانات المالية (بما فيها الفصلية) لكل الشركات (${all.length}) من FMP إلى قاعدة بيانات Supabase.\n\nقد يستغرق ~${estMin} دقيقة ويستهلك حصة FMP الخاصة بك. أبقِ هذا التبويب مفتوحاً.\n\nهل تريد المتابعة؟`
+    : `Refresh financials (incl. quarterly) for all ${all.length} companies from FMP into your Supabase database.\n\nThis takes ~${estMin} min and uses your FMP API quota. Keep this tab open.\n\nProceed?`);
+  if (!go) return;
+
+  _bulkRefreshAbort = false;
+  const ui = openBulkRefreshModal(all.length);
+
+  let done = 0, synced = 0, failed = 0;
+  const errors = [];
+
+  for (let i = 0; i < all.length; i += BATCH) {
+    if (_bulkRefreshAbort) break;
+    const batch = all.slice(i, i + BATCH);
+    ui.update(done, synced, failed, (lang === 'ar' ? 'جارٍ مزامنة: ' : 'Syncing: ') + batch.join(', '));
+
+    try {
+      const res = await fetch(getSyncTickerUrl(), {
+        method: 'POST',
+        headers: getProxyHeaders(),
+        body: JSON.stringify({ tickers: batch }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        (data.synced || []).forEach(item => { try { mergeTickerLocally(item); } catch (e) {} synced++; });
+        (data.errors || []).forEach(e => { errors.push(e); failed++; });
+      } else {
+        batch.forEach(t => { errors.push({ ticker: t, error: data.error || ('HTTP ' + res.status) }); failed++; });
+        if (res.status === 401 || res.status === 403) {
+          ui.finish(synced, failed, errors, lang === 'ar' ? 'انتهت الجلسة — سجّل الدخول مجدداً.' : 'Session expired — please sign in again.');
+          return;
+        }
+      }
+    } catch (e) {
+      batch.forEach(t => { errors.push({ ticker: t, error: e.message }); failed++; });
+    }
+
+    done += batch.length;
+    ui.update(done, synced, failed, '');
+  }
+
+  // Reflect refreshed data immediately. mergeTickerLocally already updated the live
+  // globals in place; do NOT call refreshGlobals() here — it rebuilds from the stale
+  // DB_RAW and would discard everything we just merged.
+  if (typeof buildSidebar === 'function') buildSidebar();
+
+  ui.finish(synced, failed, errors,
+    _bulkRefreshAbort
+      ? (lang === 'ar' ? 'أُلغيت المزامنة.' : 'Cancelled.')
+      : (lang === 'ar' ? '✓ اكتمل التحديث.' : '✓ Refresh complete.'));
+}
+
+function openBulkRefreshModal(total) {
+  document.getElementById('bulkRefreshOverlay')?.remove();
+  const isAr = lang === 'ar';
+  const overlay = document.createElement('div');
+  overlay.id = 'bulkRefreshOverlay';
+  overlay.className = 'pin-overlay';
+  overlay.innerHTML = `<div class="pin-card" style="max-width:460px;text-align:left">
+    <h2 style="margin-bottom:4px">🔄 ${isAr ? 'تحديث بيانات السحابة' : 'Refresh Cloud Data'}</h2>
+    <p style="margin-bottom:14px;color:var(--text2)">${isAr ? `مزامنة ${total} شركة من FMP إلى Supabase…` : `Syncing ${total} companies from FMP → Supabase…`}</p>
+    <div style="height:10px;background:rgba(148,163,184,.25);border-radius:6px;overflow:hidden;margin-bottom:8px">
+      <div id="brBar" style="height:100%;width:0%;background:linear-gradient(90deg,#10b981,#3b82f6);transition:width .3s"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text2)">
+      <span id="brCounts">0 / ${total}</span><span id="brPct">0%</span>
+    </div>
+    <div id="brNote" style="font-size:11px;color:var(--text3);margin-top:8px;min-height:16px;word-break:break-word"></div>
+    <div id="brActions" style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+      <button id="brCancel" class="pin-submit" style="background:var(--red);width:auto;padding:8px 16px" onclick="_bulkRefreshAbort=true;this.disabled=true;this.textContent='${isAr ? 'يتم الإيقاف…' : 'Stopping…'}'">${isAr ? 'إيقاف' : 'Stop'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+
+  return {
+    update(d, ok, fail, note) {
+      const pct = total ? Math.round((d / total) * 100) : 0;
+      const bar = document.getElementById('brBar'); if (bar) bar.style.width = pct + '%';
+      const c = document.getElementById('brCounts'); if (c) c.textContent = `${d} / ${total}  ·  ${ok} ✓  ·  ${fail} ✕`;
+      const p = document.getElementById('brPct'); if (p) p.textContent = pct + '%';
+      if (note) { const n = document.getElementById('brNote'); if (n) n.textContent = note; }
+    },
+    finish(ok, fail, errs, msg) {
+      const bar = document.getElementById('brBar'); if (bar) bar.style.width = '100%';
+      const isAr2 = lang === 'ar';
+      const n = document.getElementById('brNote');
+      if (n) {
+        let html = `<strong style="color:var(--green)">${msg}</strong><br>${isAr2 ? 'تمّت' : 'Synced'} ${ok} · ${isAr2 ? 'أخطاء' : 'errors'} ${fail}`;
+        if (errs && errs.length) {
+          const sample = errs.slice(0, 8).map(e => `${e.ticker}: ${e.error}`).join('<br>');
+          html += `<details style="margin-top:8px"><summary style="cursor:pointer">${isAr2 ? 'عرض الأخطاء' : 'Show errors'} (${errs.length})</summary><div style="margin-top:6px;font-size:10px;color:var(--text3);max-height:120px;overflow:auto">${sample}${errs.length > 8 ? '<br>…' : ''}</div></details>`;
+        }
+        n.innerHTML = html;
+      }
+      const acts = document.getElementById('brActions');
+      if (acts) acts.innerHTML = `<button class="pin-submit" style="width:auto;padding:8px 16px" onclick="document.getElementById('bulkRefreshOverlay')?.remove()">${isAr2 ? 'إغلاق' : 'Close'}</button>`;
+    }
+  };
+}
+
 async function loadFromSupabase() {
   const sb = getSupabase();
   if (!sb) return false;
