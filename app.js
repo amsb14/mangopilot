@@ -7830,15 +7830,38 @@ async function refreshAllCloudData() {
     : `Refresh financials (incl. quarterly) for all ${all.length} companies from FMP into your Supabase database.\n\nThis takes ~${estMin} min and uses your FMP API quota. Keep this tab open.\n\nProceed?`);
   if (!go) return;
 
+  await runBulkCloudRefresh(all);
+}
+
+// Refresh only the ticker(s) typed into the sidebar input (comma/space separated).
+// Handy for testing a single name without a full ~20-30 min run.
+async function refreshSomeCloudData() {
+  if (!isAiReady()) { showPinModal(); return; }
+  const inp = document.getElementById('refreshTickersInput');
+  const list = [...new Set(((inp && inp.value) || '')
+    .split(/[,\s]+/).map(t => t.trim().toUpperCase())
+    .filter(t => /^[A-Z][A-Z.-]{0,5}$/.test(t)))];
+  if (!list.length) {
+    alert(lang === 'ar' ? 'اكتب رمزاً واحداً أو أكثر (مثال: AAPL, MSFT).' : 'Enter one or more tickers (e.g. AAPL, MSFT).');
+    return;
+  }
+  await runBulkCloudRefresh(list);
+  if (inp) inp.value = '';
+}
+
+// Shared engine: sync a list of tickers through the sync-ticker edge function,
+// 10 at a time, with a progress modal. Used by both "refresh all" and "refresh some".
+async function runBulkCloudRefresh(list) {
+  const BATCH = 10; // sync-ticker caps at 10/call to fit Supabase's 50s edge timeout
   _bulkRefreshAbort = false;
-  const ui = openBulkRefreshModal(all.length);
+  const ui = openBulkRefreshModal(list.length);
 
   let done = 0, synced = 0, failed = 0;
   const errors = [];
 
-  for (let i = 0; i < all.length; i += BATCH) {
+  for (let i = 0; i < list.length; i += BATCH) {
     if (_bulkRefreshAbort) break;
-    const batch = all.slice(i, i + BATCH);
+    const batch = list.slice(i, i + BATCH);
     ui.update(done, synced, failed, (lang === 'ar' ? 'جارٍ مزامنة: ' : 'Syncing: ') + batch.join(', '));
 
     try {

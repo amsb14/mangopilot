@@ -113,6 +113,10 @@
     </div>
     <div class="sidebar-section" style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
       <div class="sidebar-label">🔄 Data</div>
+      <div style="display:flex;gap:4px;margin-top:6px">
+        <input id="refreshTickersInput" placeholder="AAPL, MSFT…" autocomplete="off" onkeydown="if(event.key==='Enter')refreshSomeCloudData()" title="Refresh only these ticker(s) from FMP — comma-separated. Good for testing." style="flex:1;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:11px;font-family:var(--font)" />
+        <button class="act-btn" onclick="refreshSomeCloudData()" title="Refresh only the ticker(s) you typed — good for testing" style="font-size:10px;padding:6px 10px">Refresh</button>
+      </div>
       <button class="act-btn" onclick="refreshAllCloudData()" title="Re-sync every company's financials (including quarterly) from FMP into the cloud database. Signed-in owner action — takes several minutes." style="width:100%;margin-top:6px;font-size:10px;padding:6px 8px">⟳ Refresh all data</button>
     </div>
   </aside>
