@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Sync — FMP → Supabase</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<style>
+  :root{--bg:#0a0f1a;--surface:#111827;--border:#1e293b;--text:#e2e8f0;--muted:#64748b;--accent:#3b82f6;--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--orange:#f97316}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;max-width:640px;width:100%}
+  h1{font-size:24px;margin-bottom:4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:24px}
+  label{display:block;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;margin-top:16px}
+  input,textarea{width:100%;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px;font-family:monospace;outline:none}
+  input:focus,textarea:focus{border-color:var(--accent)}
+  textarea{min-height:80px;resize:vertical}
+  .btn{padding:12px 24px;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;transition:all .2s;width:100%;margin-top:8px}
+  .btn:hover{opacity:.9}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn-primary{background:var(--accent);color:#fff;margin-top:12px}
+  .btn-test{background:transparent;border:1px solid var(--accent);color:var(--accent);margin-top:16px;padding:10px}
+  .btn-test:hover{background:rgba(59,130,246,.1)}
+  /* Control buttons row */
+  .ctrl-row{display:flex;gap:8px;margin-top:8px}
+  .ctrl-row .btn{width:auto;flex:1;margin-top:0;padding:10px 16px;font-size:13px}
+  .btn-pause{background:var(--yellow);color:#000}
+  .btn-resume{background:var(--green);color:#fff}
+  .btn-stop{background:var(--red);color:#fff}
+  .btn-retry{background:var(--orange);color:#fff}
+  .log{margin-top:20px;max-height:350px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.8;padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:10px}
+  .log .ok{color:var(--green)}.log .err{color:var(--red)}.log .info{color:var(--accent)}.log .warn{color:var(--yellow)}.log .pause{color:var(--orange)}
+  .progress{margin-top:16px}
+  .progress-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+  .progress-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--accent));border-radius:3px;transition:width .3s;width:0%}
+  .progress-label{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:4px}
+  .stats{display:flex;gap:16px;margin-top:16px;padding:12px;background:var(--bg);border-radius:10px;border:1px solid var(--border)}
+  .stat{text-align:center;flex:1}.stat-num{font-size:22px;font-weight:700}.stat-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .note{font-size:11px;color:var(--muted);margin-top:12px;line-height:1.6}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔄 Admin Sync</h1>
+  <div class="sub">Pull financial data from FMP → push to Supabase. Run quarterly.</div>
+  <label>Supabase Project URL</label>
+  <input id="sbUrl" placeholder="https://xxxxx.supabase.co" />
+  <label>Supabase Service Role Key</label>
+  <input id="sbKey" type="password" placeholder="eyJhbGci..." />
+  <label>FMP API Key</label>
+  <input id="fmpKey" type="password" placeholder="Your FMP Starter key" />
+  <label>Tickers (comma-separated)</label>
+  <textarea id="tickers" placeholder="AAPL, MSFT, GOOGL, AMZN, NVDA, TSLA..."></textarea>
+  <div class="note">⚠️ Use the <strong>service_role</strong> key. Never share this page publicly.</div>
+  <button class="btn btn-test" onclick="testConnection()">🔌 Test Connection</button>
+  <button class="btn btn-primary" id="syncBtn" onclick="startSync()">🚀 Start Sync</button>
+  <div class="ctrl-row hidden" id="ctrlRow">
+    <button class="btn btn-pause" id="pauseBtn" onclick="togglePause()">⏸ Pause</button>
+    <button class="btn btn-stop" id="stopBtn" onclick="stopSync()">⏹ Stop</button>
+  </div>
+  <div class="ctrl-row hidden" id="retryRow">
+    <button class="btn btn-retry" onclick="retryFailed()">🔄 Retry Failed (<span id="retryCount">0</span>)</button>
+    <button class="btn btn-primary" style="background:var(--accent)" onclick="startSync()">🚀 New Sync</button>
+  </div>
+  <div class="progress hidden" id="pw"><div class="progress-label"><span id="pL"></span><span id="pP"></span></div><div class="progress-bar"><div class="progress-fill" id="pB"></div></div></div>
+  <div class="stats hidden" id="sw">
+    <div class="stat"><div class="stat-num" id="sD" style="color:var(--green)">0</div><div class="stat-lbl">Synced</div></div>
+    <div class="stat"><div class="stat-num" id="sE" style="color:var(--red)">0</div><div class="stat-lbl">Errors</div></div>
+    <div class="stat"><div class="stat-num" id="sS" style="color:var(--yellow)">0</div><div class="stat-lbl">Skipped</div></div>
+    <div class="stat"><div class="stat-num" id="sT" style="color:var(--accent)">0</div><div class="stat-lbl">Total</div></div>
+  </div>
+  <div class="log hidden" id="log"></div>
+</div>
+<script>
+const FMP='https://financialmodelingprep.com/stable';
+let sb=null;
+
+// Sync state
+let isPaused=false, isStopped=false;
+let failedTickers=[];
+let syncInProgress=false;
+
+function log(m,c=''){const e=document.getElementById('log');e.classList.remove('hidden');e.innerHTML+=`<div class="${c}">${new Date().toLocaleTimeString()} ${m}</div>`;e.scrollTop=e.scrollHeight}
+function prog(p,l){const w=document.getElementById('pw');w.classList.remove('hidden');document.getElementById('pB').style.width=p+'%';document.getElementById('pL').textContent=l;document.getElementById('pP').textContent=Math.round(p)+'%'}
+function stats(d,e,s,t){const w=document.getElementById('sw');w.classList.remove('hidden');document.getElementById('sD').textContent=d;document.getElementById('sE').textContent=e;document.getElementById('sS').textContent=s;document.getElementById('sT').textContent=t}
+
+function showControls(show){document.getElementById('ctrlRow').classList.toggle('hidden',!show);document.getElementById('retryRow').classList.add('hidden')}
+function showRetry(){document.getElementById('ctrlRow').classList.add('hidden');if(failedTickers.length){document.getElementById('retryRow').classList.remove('hidden');document.getElementById('retryCount').textContent=failedTickers.length}}
+
+function togglePause(){
+  isPaused=!isPaused;
+  const btn=document.getElementById('pauseBtn');
+  if(isPaused){btn.textContent='▶ Resume';btn.className='btn btn-resume';log('⏸ PAUSED — click Resume to continue','pause')}
+  else{btn.textContent='⏸ Pause';btn.className='btn btn-pause';log('▶ RESUMED','info')}
+}
+
+function stopSync(){isStopped=true;log('⏹ STOPPING after current batch...','warn')}
+
+async function waitWhilePaused(){while(isPaused&&!isStopped)await new Promise(r=>setTimeout(r,500))}
+
+function initSB(){
+  let u=document.getElementById('sbUrl').value.trim().replace(/\/+$/,'');
+  const k=document.getElementById('sbKey').value.trim();
+  if(!u||!k){log('Missing Supabase URL or key','err');return null}
+  try{
+    const c=(window.supabase&&window.supabase.createClient)||(typeof supabase!=='undefined'&&supabase.createClient);
+    if(!c){log('Supabase JS not loaded','err');return null}
+    sb=c(u,k,{auth:{persistSession:false,autoRefreshToken:false}});return sb;
+  }catch(e){log('Init error: '+e.message,'err');return null}
+}
+
+async function testConnection(){
+  log('─── Testing ───','info');
+  const c=initSB();if(!c)return;
+  try{const{data,error}=await c.from('sync_metadata').select('*').eq('id',1);
+    if(error){log('❌ Supabase READ: '+error.message,'err');if(error.message.includes('relation'))log('→ Run the SQL schema first','warn')}
+    else log('✅ Supabase READ OK','ok');
+  }catch(e){log('❌ Connection: '+e.message,'err');return}
+  try{const{error}=await c.from('sync_metadata').upsert({id:1,last_sync:new Date().toISOString(),ticker_count:0,source:'test'});
+    if(error)log('❌ Supabase WRITE: '+error.message+' → Use service_role key','err');
+    else log('✅ Supabase WRITE OK','ok');
+  }catch(e){log('❌ Write: '+e.message,'err')}
+  const fk=document.getElementById('fmpKey').value.trim();
+  if(fk){try{const r=await fetch(`${FMP}/profile?symbol=AAPL&apikey=${fk}`);
+    if(!r.ok)log('❌ FMP: HTTP '+r.status,'err');
+    else{const d=await r.json();if(d&&d.length)log(`✅ FMP OK: ${d[0].companyName} $${d[0].price}`,'ok');else log('❌ FMP empty','err')}
+  }catch(e){log('❌ FMP: '+e.message,'err')}}
+  log('─── Done ───','info');
+}
+
+async function fmpGet(ep,p,key){
+  const q=new URLSearchParams({...p,apikey:key}).toString();
+  for(let a=0;a<4;a++){try{
+    const r=await fetch(`${FMP}/${ep}?${q}`);
+    if(r.status===429){const w=5000*(a+1);log(`⏳ Rate limited, waiting ${w/1000}s...`,'warn');await new Promise(w2=>setTimeout(w2,w));continue}
+    if(!r.ok){if(a<3){await new Promise(w=>setTimeout(w,2000));continue}throw new Error('HTTP '+r.status)}
+    return r.json();
+  }catch(e){if(a>=3)throw e;await new Promise(w=>setTimeout(w,2000))}}
+  throw new Error('Max retries');
+}
+
+async function syncOne(sym,fk){
+  const[inc,bal,cf,prof,qI,qC,estData]=await Promise.all([
+    fmpGet('income-statement',{symbol:sym,period:'annual',limit:5},fk),
+    fmpGet('balance-sheet-statement',{symbol:sym,period:'annual',limit:5},fk),
+    fmpGet('cash-flow-statement',{symbol:sym,period:'annual',limit:5},fk),
+    fmpGet('profile',{symbol:sym},fk),
+    fmpGet('income-statement',{symbol:sym,period:'quarter',limit:8},fk).catch(()=>[]),
+    fmpGet('cash-flow-statement',{symbol:sym,period:'quarter',limit:8},fk).catch(()=>[]),
+    fmpGet('analyst-estimates',{symbol:sym,period:'annual',limit:5},fk).catch(()=>[]),
+  ]);
+  const p=Array.isArray(prof)?prof[0]:prof;
+  if(p){const{error}=await sb.from('company_profiles').upsert({
+    symbol:sym,company_name:p.companyName||null,sector:p.sector||null,industry:p.industry||null,
+    exchange:p.exchange||null,country:p.country||null,price:p.price||null,market_cap:p.marketCap||null,
+    beta:p.beta||null,last_dividend:p.lastDividend||null,range_52w:p.range||null,ceo:p.ceo||null,
+    employees:p.fullTimeEmployees||null,description:p.description||null,image:p.image||null,
+    ipo_date:p.ipoDate||null,updated_at:new Date().toISOString()
+  },{onConflict:'symbol'});if(error)throw new Error('Profile: '+error.message)}
+
+  const by={},yrs=new Set();
+  (inc||[]).filter(r=>r.period==='FY').forEach(r=>{const y=parseInt(r.fiscalYear)||new Date(r.date).getFullYear();yrs.add(y);by[y]={...by[y],i:r}});
+  (bal||[]).filter(r=>r.period==='FY').forEach(r=>{const y=parseInt(r.fiscalYear)||new Date(r.date).getFullYear();yrs.add(y);by[y]={...by[y],b:r}});
+  (cf||[]).filter(r=>r.period==='FY').forEach(r=>{const y=parseInt(r.fiscalYear)||new Date(r.date).getFullYear();yrs.add(y);by[y]={...by[y],c:r}});
+
+  const rows=[];
+  for(const yr of yrs){const i=by[yr]?.i||{},b=by[yr]?.b||{},c=by[yr]?.c||{};
+    rows.push({symbol:sym,fiscal_year:yr,revenue:i.revenue??null,cost_of_revenue:i.costOfRevenue??null,
+      gross_profit:i.grossProfit??null,operating_income:i.operatingIncome??null,net_income:i.netIncome??null,
+      ebitda:i.ebitda??null,ebit:i.ebit??null,eps_diluted:i.epsDiluted??null,interest_expense:i.interestExpense??null,
+      tax_provision:i.incomeTaxExpense??null,shares_diluted:i.weightedAverageShsOutDil??null,
+      research_and_development:i.researchAndDevelopmentExpenses??null,sga:i.sellingGeneralAndAdministrativeExpenses??null,
+      total_assets:b.totalAssets??null,total_liabilities:b.totalLiabilities??null,
+      equity:b.totalStockholdersEquity??b.totalEquity??null,total_debt:b.totalDebt??null,
+      cash:b.cashAndCashEquivalents??null,current_assets:b.totalCurrentAssets??null,
+      current_liabilities:b.totalCurrentLiabilities??null,long_term_debt:b.longTermDebt??null,
+      retained_earnings:b.retainedEarnings??null,inventory:b.inventory??null,
+      receivables:b.netReceivables??b.accountsReceivables??null,net_ppe:b.propertyPlantEquipmentNet??null,
+      operating_cash_flow:c.operatingCashFlow??c.netCashProvidedByOperatingActivities??null,
+      capital_expenditures:c.capitalExpenditure?-Math.abs(c.capitalExpenditure):null,
+      free_cash_flow:c.freeCashFlow??null,investing_cash_flow:c.netCashProvidedByInvestingActivities??null,
+      financing_cash_flow:c.netCashProvidedByFinancingActivities??null,
+      depreciation:c.depreciationAndAmortization??null,stock_based_comp:c.stockBasedCompensation??null,
+      dividends_paid:c.commonDividendsPaid??null,share_repurchase:c.commonStockRepurchased??null,
+      updated_at:new Date().toISOString()});}
+
+  if(rows.length){const{error}=await sb.from('annual_financials').upsert(rows,{onConflict:'symbol,fiscal_year'});if(error)throw new Error('Annual: '+error.message)}
+
+  const qr=[];
+  (qI||[]).filter(r=>r.period!=='FY').forEach(r=>{const x=(qC||[]).find(c=>c.date===r.date)||{};
+    qr.push({symbol:sym,fiscal_date:r.date,period:r.period||null,revenue:r.revenue??null,net_income:r.netIncome??null,
+      operating_income:r.operatingIncome??null,gross_profit:r.grossProfit??null,eps_diluted:r.epsDiluted??null,
+      operating_cash_flow:x.operatingCashFlow??x.netCashProvidedByOperatingActivities??null,
+      free_cash_flow:x.freeCashFlow??null,updated_at:new Date().toISOString()})});
+  if(qr.length){const{error}=await sb.from('quarterly_financials').upsert(qr,{onConflict:'symbol,fiscal_date'});if(error)throw new Error('Q: '+error.message)}
+
+  // Analyst estimates
+  const estRows=(estData||[]).map(e=>({
+    symbol:sym,date:e.date,revenue_avg:e.revenueAvg??null,revenue_low:e.revenueLow??null,
+    revenue_high:e.revenueHigh??null,ebitda_avg:e.ebitdaAvg??null,
+    net_income_avg:e.netIncomeAvg??null,net_income_low:e.netIncomeLow??null,net_income_high:e.netIncomeHigh??null,
+    eps_avg:e.epsAvg??null,eps_low:e.epsLow??null,eps_high:e.epsHigh??null,
+    sga_expense_avg:e.sgaExpenseAvg??null,num_analysts_revenue:e.numAnalystsRevenue??null,
+    num_analysts_eps:e.numAnalystsEps??null,updated_at:new Date().toISOString()
+  }));
+  if(estRows.length){const{error}=await sb.from('analyst_estimates').upsert(estRows,{onConflict:'symbol,date'});if(error)throw new Error('Est: '+error.message)}
+
+  return{years:yrs.size,quarters:qr.length,estimates:estRows.length};
+}
+
+async function runSyncLoop(tickers){
+  const fk=document.getElementById('fmpKey').value.trim();
+  const BATCH=3;
+  let done=0,errs=0,skipped=0;
+  failedTickers=[];
+
+  for(let i=0;i<tickers.length;i+=BATCH){
+    // Check pause/stop
+    if(isStopped){skipped=tickers.length-i;log(`⏹ Stopped. ${skipped} tickers skipped.`,'warn');break}
+    await waitWhilePaused();
+    if(isStopped){skipped=tickers.length-i;break}
+
+    const batch=tickers.slice(i,i+BATCH);
+    prog((i/tickers.length)*100,`${done}✓ ${errs}✕ — ${batch.join(', ')}`);
+    stats(done,errs,skipped,tickers.length);
+
+    const results=await Promise.allSettled(batch.map(async t=>{
+      try{const r=await syncOne(t,fk);return{t,r}}catch(e){throw{t,e}}
+    }));
+
+    results.forEach(res=>{
+      if(res.status==='fulfilled'){done++;log(`✓ ${res.value.t} — ${res.value.r.years}yr ${res.value.r.quarters}Q ${res.value.r.estimates||0}est`,'ok')}
+      else{errs++;failedTickers.push(res.reason.t);log(`✕ ${res.reason.t} — ${res.reason.e.message||res.reason.e}`,'err')}
+    });
+
+    if(i+BATCH<tickers.length&&!isStopped)await new Promise(r=>setTimeout(r,2000));
+  }
+
+  // Update metadata
+  try{await sb.from('sync_metadata').upsert({id:1,last_sync:new Date().toISOString(),ticker_count:done,source:'fmp'})}catch(e){}
+
+  prog(100,isStopped?'Stopped':'Complete!');
+  stats(done,errs,skipped,tickers.length);
+  log(`${isStopped?'Stopped':'Done'}: ${done} synced, ${errs} errors, ${skipped} skipped.`,done===tickers.length?'ok':'warn');
+
+  return{done,errs,skipped};
+}
+
+async function startSync(){
+  const ts=document.getElementById('tickers').value.trim();
+  const fk=document.getElementById('fmpKey').value.trim();
+  if(!fk||!ts){log('Fill in all fields','err');return}
+  if(syncInProgress){log('Sync already running','warn');return}
+  sb=initSB();if(!sb)return;
+
+  const tickers=ts.split(/[,\s\n]+/).map(t=>t.trim().toUpperCase()).filter(Boolean);
+  const btn=document.getElementById('syncBtn');
+  btn.disabled=true;btn.textContent='Syncing...';
+  syncInProgress=true;isPaused=false;isStopped=false;failedTickers=[];
+  showControls(true);
+
+  log(`Starting sync of ${tickers.length} tickers...`,'info');
+  await runSyncLoop(tickers);
+
+  syncInProgress=false;
+  btn.disabled=false;btn.textContent='🚀 Re-sync';
+  showControls(false);
+  showRetry();
+}
+
+async function retryFailed(){
+  if(!failedTickers.length){log('No failed tickers to retry','info');return}
+  if(syncInProgress){log('Sync already running','warn');return}
+  if(!sb){sb=initSB();if(!sb)return}
+
+  const tickers=[...failedTickers];
+  const btn=document.getElementById('syncBtn');
+  btn.disabled=true;
+  syncInProgress=true;isPaused=false;isStopped=false;
+  document.getElementById('retryRow').classList.add('hidden');
+  showControls(true);
+
+  log(`Retrying ${tickers.length} failed tickers: ${tickers.join(', ')}`,'info');
+  await runSyncLoop(tickers);
+
+  syncInProgress=false;
+  btn.disabled=false;btn.textContent='🚀 Re-sync';
+  showControls(false);
+  showRetry();
+}
+</script>
+</body>
+</html>

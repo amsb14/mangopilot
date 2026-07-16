@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Smart Financial Analyzer | محلل مالي ذكي</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&family=Cairo:wght@300;400;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="orbs"><div class="orb o1"></div><div class="orb o2"></div></div>
+
+<!-- HEADER -->
+<header class="hdr">
+  <div class="hdr-inner">
+    <div class="logo">
+      <div class="logo-icon">📊</div>
+      <span class="logo-en">Smart Financial Analyzer</span>
+      <span class="logo-ar">المحلل المالي الذكي</span>
+    </div>
+
+    <div class="hdr-center">
+      <div class="hdr-search-wrap">
+        <span class="hdr-search-icon">🔍</span>
+        <input class="hdr-search" id="hdrSearch" type="text" placeholder="Search ticker or company…" autocomplete="off"
+          oninput="onHdrSearch()" onkeydown="onHdrKey(event)" onfocus="openDrop()" />
+        <div class="hdr-search-drop" id="hdrDrop"></div>
+      </div>
+    </div>
+
+    <div class="hdr-right">
+      <button class="icon-btn" id="memoryBtn" onclick="showPinModal()" title="Memory / Identity">🧠 <span id="memoryLbl">Sign In</span></button>
+      <button class="icon-btn" id="modelBtn" onclick="toggleModel()" title="Switch AI model">🤖 GPT-4o mini</button>
+      <button class="icon-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
+      <button class="icon-btn" id="langBtn" onclick="toggleLang()">🌐 <span id="langLbl">العربية</span></button>
+    </div>
+  </div>
+</header>
+
+<!-- LAYOUT -->
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label" id="sidebarLabel">Browse Companies</div>
+      <div style="display:flex;gap:4px;margin-bottom:6px">
+        <button class="act-btn" onclick="showHeatmap()" style="flex:1;font-size:10px;padding:5px 8px">🗺️ Heatmap</button>
+        <button class="act-btn" onclick="backToChat()" style="flex:1;font-size:10px;padding:5px 8px">💬 Chat</button>
+      </div>
+      <input class="sidebar-search" id="sidebarSearch" placeholder="Search…" oninput="filterSidebar()" />
+      <div class="sector-list" id="sectorList"></div>
+    </div>
+    <div class="sidebar-section" style="border-bottom:1px solid var(--border);padding-bottom:10px">
+      <div class="sidebar-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="document.getElementById('screenerFilters').classList.toggle('hidden')">
+        🔍 <span id="screenerLabel">Screener</span> <span style="font-size:10px;color:var(--text3)">▼</span>
+      </div>
+      <div id="screenerFilters" class="hidden" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;font-size:11px">
+        <select id="filterPrice" onchange="applyScreener()" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:11px;font-family:var(--font)">
+          <option value="">Price: Any</option>
+          <option value="0-50">Under $50</option>
+          <option value="50-100">$50 – $100</option>
+          <option value="100-250">$100 – $250</option>
+          <option value="250-500">$250 – $500</option>
+          <option value="500+">Above $500</option>
+        </select>
+        <select id="filterScore" onchange="applyScreener()" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:11px;font-family:var(--font)">
+          <option value="">Score: Any</option>
+          <option value="8+">★ 8+ Excellent</option>
+          <option value="6-8">6-8 Good</option>
+          <option value="4-6">4-6 Average</option>
+          <option value="0-4">Below 4 Weak</option>
+        </select>
+        <select id="filterValue" onchange="applyScreener()" style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:11px;font-family:var(--font)">
+          <option value="">Value: Any</option>
+          <option value="undervalued">Potential Undervalued (P/E &lt; 15)</option>
+          <option value="growth">Growth (Rev Growth &gt; 15%)</option>
+          <option value="dividend">Dividend Payers</option>
+          <option value="lowdebt">Low Debt (D/E &lt; 0.5)</option>
+          <option value="profitable">Highly Profitable (Margin &gt; 20%)</option>
+        </select>
+        <button onclick="clearScreener()" style="padding:5px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text3);font-size:10px;cursor:pointer;font-family:var(--font)">✕ Clear Filters</button>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label" id="sidebarTickersLabel">Companies</div>
+      <div class="ticker-list" id="sidebarTickers"></div>
+    </div>
+    <div class="sidebar-section" style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div class="sidebar-label">💼 <span id="portfolioLabel">Portfolio</span></div>
+      <div id="portfolioPanel" style="margin-top:6px"></div>
+    </div>
+    <div class="sidebar-section" style="border-top:1px solid var(--border);padding-top:10px;margin-top:10px">
+      <div class="sidebar-label journal-sidebar-trigger" onclick="showJournal()" title="Open my picks journal">
+        <span>📓 <span id="journalLabel">My Picks</span></span>
+        <span id="journalCountBadge" class="journal-badge hidden">0</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- CONTENT -->
+  <main class="content">
+
+    <!-- Compare bar -->
+    <div class="cmp-bar hidden" id="cmpBar">
+      <span class="cmp-bar-label" id="cmpBarLabel">Comparing:</span>
+      <div class="cmp-chips" id="cmpChips"></div>
+      <button class="cmp-btn" onclick="showCompare()" id="cmpGoBtn">Compare →</button>
+      <button class="icon-btn" onclick="clearCmp()">✕ Clear</button>
+    </div>
+
+    <div class="watchlist-panel hidden" id="watchlistPanel"></div>
+
+    <!-- Main content area -->
+    <div id="mainArea">
+
+      <!-- Loading screen (shown only during initial data load) -->
+      <div id="welcomeScreen">
+        <div class="welcome" id="uploadWelcome">
+          <div class="welcome-eyebrow">☁️ <span id="eyebrowTxt">Cloud-Powered Financial Analysis</span></div>
+          <h1 id="welcomeH1">Smart Financial<br>Analyzer</h1>
+          <p id="welcomeP">Loading financial data from cloud database...</p>
+          <div style="margin-top:24px"><div class="loader"><div class="spin"></div><span class="loader-txt">Connecting to Supabase...</span></div></div>
+          <div class="how-grid" style="margin-top:36px">
+            <div class="how-card"><div class="how-icon">☁️</div><div class="how-title" id="hw1T">Cloud Database</div><div class="how-txt" id="hw1X">All financial data is stored in the cloud and loads automatically.</div></div>
+            <div class="how-card"><div class="how-icon">🔄</div><div class="how-title" id="hw2T">Updated Quarterly</div><div class="how-txt" id="hw2X">Data is refreshed every quarter when new earnings are released.</div></div>
+            <div class="how-card"><div class="how-icon">🤖</div><div class="how-title" id="hw3T">AI Research Partner</div><div class="how-txt" id="hw3X">Ask questions in natural language. Get deep analysis with charts, peer comparison, and risk detection.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Chat view (default landing after data loads) -->
+      <div id="chatView" class="hidden">
+        <div id="chatWelcome" class="chat-welcome">
+          <div class="chat-welcome-icon">✦</div>
+          <h2 id="chatWelcomeH2">What would you like to research?</h2>
+          <p id="chatWelcomeP" class="chat-welcome-sub"></p>
+          <div id="chatSuggestions" class="chat-suggestions"></div>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div id="chatInputArea" class="chat-input-area">
+          <div class="chat-input-row">
+            <input id="chatInput" type="text" class="chat-input" placeholder="Ask about any company, sector, or strategy..." autocomplete="off" onkeydown="if(event.key==='Enter')handleChatInput()" />
+            <button id="chatSendBtn" class="chat-send-btn" onclick="handleChatInput()">➤</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dashboard panel (slides in for full ticker view) -->
+      <div id="dashPanel" class="dash-panel hidden">
+        <div class="dash-panel-hdr">
+          <button class="dash-close-btn" onclick="closeDashPanel()">← <span id="dashCloseLabel">Back to Chat</span></button>
+        </div>
+        <div id="dashPanelContent"></div>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
