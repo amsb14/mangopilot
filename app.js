@@ -3324,15 +3324,18 @@ async function quickSaveCurrentTicker() {
     return;
   }
   const t = activeTicker;
-  // Try to grab the last AI message about this ticker as rationale
+  // Rationale = rule-based snapshot verdict (if computed for this ticker) + last AI take
   let rationale = '';
+  if (_lastVerdict?.ticker === t) rationale = _lastVerdict.summary;
   const recentChat = (chatHistory || []).filter(m => m.role === 'agent' && m.ticker === t).pop();
   if (recentChat?.content) {
-    rationale = recentChat.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1500);
+    const aiTxt = recentChat.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    rationale = rationale ? `${rationale}\n\nAI take: ${aiTxt}` : aiTxt;
   }
   const btn = document.querySelector('.sb-journal-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ ' + (lang==='ar'?'جاري الحفظ...':'Saving...'); }
-  const result = await saveToJournal({ ticker: t, source: 'dashboard', rationale });
+  const result = await saveToJournal({ ticker: t, source: 'dashboard', rationale,
+    confidence: _lastVerdict?.ticker === t ? _lastVerdict.confidence : null });
   if (btn) {
     if (result) {
       btn.textContent = '✓ ' + (lang==='ar'?'محفوظ':'Saved');
@@ -5585,6 +5588,253 @@ function drawCharts(ticker, rows, m) {
 // ── LOAD TICKER ───────────────────────────────────────────────────────────────
 let _dashTarget = null;
 
+// ── DECISION CARD (rule-based, token-free) ───────────────────────────────────
+// Verdict + "what's priced in" computed entirely from local data. No LLM calls.
+let _lastVerdict = null; // {ticker, summary, confidence} — attached to journal saves
+
+function _dbMaxYear() {
+  let y = 0;
+  TICKERS.forEach(t => { const a = ANNUAL[t]; if (a?.length) y = Math.max(y, a[a.length - 1].year); });
+  return y;
+}
+
+// P/E standing within the ticker's sector (uses precomputed STOCK.pe — cheap)
+function computeSectorPE(ticker) {
+  const sec = STOCK[ticker]?.sector;
+  if (!sec) return null;
+  const pes = TICKERS.filter(t => STOCK[t]?.sector === sec && STOCK[t].pe > 0 && STOCK[t].pe < 200)
+    .map(t => STOCK[t].pe).sort((a, b) => a - b);
+  if (pes.length < 5) return null;
+  const median = pes[Math.floor(pes.length / 2)];
+  const pe = STOCK[ticker]?.pe;
+  const pct = (pe > 0) ? Math.round(pes.filter(x => x <= pe).length / pes.length * 100) : null;
+  return { median, pct, count: pes.length };
+}
+
+// Reverse DCF: what constant 10y FCF growth does the current market cap imply?
+function computeImpliedGrowth(ticker, m, opts = {}) {
+  const stk = STOCK[ticker] || {};
+  const lat = m.latest || {};
+  const mcap = stk.marketCap || (stk.price && lat.shares_diluted ? stk.price * lat.shares_diluted : null);
+  const fcf = lat.free_cash_flow;
+  if (!mcap || fcf == null) return null;
+  if (fcf <= 0) return { negative: true, fcf, mcap };
+
+  const N = 10, gt = 0.025;
+  const pvAt = (g, r) => {
+    let pv = 0, c = fcf;
+    for (let i = 1; i <= N; i++) { c = c * (1 + g); pv += c / Math.pow(1 + r, i); }
+    const term = (r > gt) ? (c * (1 + gt) / (r - gt)) / Math.pow(1 + r, N) : Infinity;
+    return pv + term;
+  };
+  const solve = (r) => {
+    let lo = -0.5, hi = 1.0;
+    if (pvAt(lo, r) > mcap) return lo; // cheaper than even -50%/yr implies
+    if (pvAt(hi, r) < mcap) return hi;
+    for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; (pvAt(mid, r) < mcap) ? lo = mid : hi = mid; }
+    return (lo + hi) / 2;
+  };
+
+  // Trailing FCF CAGR over up to 4 years (needs positive endpoints)
+  let trailing = null;
+  const cfs = m.cf.filter(c => c.fcf != null);
+  if (cfs.length >= 3) {
+    const first = cfs[Math.max(0, cfs.length - 4)], last = cfs[cfs.length - 1];
+    const yrs = last.year - first.year;
+    if (yrs > 0 && first.fcf > 0 && last.fcf > 0) trailing = (Math.pow(last.fcf / first.fcf, 1 / yrs) - 1) * 100;
+  }
+
+  // Analyst forward revenue CAGR from latest actual to furthest future estimate
+  let analyst = null;
+  const est = (ESTIMATES[ticker] || []).filter(e => e.revenueAvg && new Date(e.date) > new Date())
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (est.length && lat.revenue > 0) {
+    const far = est[est.length - 1];
+    const yrs = Math.max(1, (new Date(far.date) - new Date()) / 31557600000);
+    analyst = (Math.pow(far.revenueAvg / lat.revenue, 1 / yrs) - 1) * 100;
+  }
+
+  return {
+    implied: solve(0.10) * 100, sens8: solve(0.08) * 100, sens12: solve(0.12) * 100,
+    trailing, analyst, pFcf: mcap / fcf, fcf, mcap,
+  };
+}
+
+// Rule-based verdict: quality (scores) × valuation (sector P/E percentile or P/FCF)
+function computeVerdict(ticker, m, scores) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const stk = STOCK[ticker] || {};
+  const lat = m.latest || {};
+  const secPE = computeSectorPE(ticker);
+  const ig = computeImpliedGrowth(ticker, m);
+
+  // Valuation tier
+  let val = 'na', valLine = L('Valuation: not measurable (no positive earnings or FCF)', 'التقييم: غير قابل للقياس (لا أرباح أو تدفق حر موجب)');
+  if (stk.pe > 0 && secPE?.pct != null) {
+    val = secPE.pct <= 40 ? 'cheap' : secPE.pct <= 70 ? 'fair' : 'rich';
+    valLine = L(`P/E ${stk.pe.toFixed(1)}x vs sector median ${secPE.median.toFixed(1)}x — ${secPE.pct}th percentile of ${secPE.count}`,
+                `مضاعف الربح ${stk.pe.toFixed(1)}x مقابل وسيط القطاع ${secPE.median.toFixed(1)}x — المئين ${secPE.pct} من ${secPE.count}`);
+  } else if (stk.pe > 0) {
+    val = stk.pe <= 15 ? 'cheap' : stk.pe <= 28 ? 'fair' : 'rich';
+    valLine = L(`P/E ${stk.pe.toFixed(1)}x (sector comparison unavailable)`, `مضاعف الربح ${stk.pe.toFixed(1)}x (لا تتوفر مقارنة قطاعية)`);
+  } else if (ig && !ig.negative && ig.pFcf > 0) {
+    val = ig.pFcf <= 15 ? 'cheap' : ig.pFcf <= 30 ? 'fair' : 'rich';
+    valLine = L(`No positive earnings — P/FCF ${ig.pFcf.toFixed(1)}x`, `لا أرباح موجبة — السعر/التدفق الحر ${ig.pFcf.toFixed(1)}x`);
+  }
+
+  // Quality tier
+  const q = scores.overall >= 6.5 ? 'hi' : scores.overall >= 5 ? 'mid' : 'low';
+
+  const VERDICTS = {
+    'hi:cheap':  ['💎', L('Quality at a reasonable price', 'جودة بسعر معقول'), 'var(--green)'],
+    'hi:fair':   ['💎', L('Quality at a fair price', 'جودة بسعر عادل'), 'var(--green)'],
+    'hi:rich':   ['💰', L('Great business, demanding price', 'شركة ممتازة بسعر مرتفع'), 'var(--yellow)'],
+    'hi:na':     ['⭐', L('Strong fundamentals, valuation unclear', 'أساسيات قوية والتقييم غير واضح'), 'var(--accent)'],
+    'mid:cheap': ['🧐', L('Average business, undemanding price', 'شركة متوسطة بسعر متواضع'), 'var(--accent)'],
+    'mid:fair':  ['🔍', L('Middle of the pack', 'في منتصف المجموعة'), 'var(--text2)'],
+    'mid:rich':  ['⚠️', L('Average business, rich price', 'شركة متوسطة بسعر مرتفع'), 'var(--yellow)'],
+    'mid:na':    ['🔍', L('Middle of the pack', 'في منتصف المجموعة'), 'var(--text2)'],
+    'low:cheap': ['⚠️', L('Cheap — but maybe for a reason', 'رخيصة — ربما لسبب'), 'var(--yellow)'],
+    'low:fair':  ['⚠️', L('Weak fundamentals', 'أساسيات ضعيفة'), 'var(--red)'],
+    'low:rich':  ['🚫', L('Weak fundamentals at a rich price', 'أساسيات ضعيفة بسعر مرتفع'), 'var(--red)'],
+    'low:na':    ['⚠️', L('Weak fundamentals', 'أساسيات ضعيفة'), 'var(--red)'],
+  };
+  const [icon, label, color] = VERDICTS[`${q}:${val}`];
+
+  // Strengths / risks from the same inputs the scores use (priority-ordered)
+  const strengths = [], risks = [];
+  const S = (txtEn, txtAr) => strengths.push(L(txtEn, txtAr));
+  const R = (txtEn, txtAr) => risks.push(L(txtEn, txtAr));
+  const yoyLast = m.yoy[m.yoy.length - 1];
+  const profLast = m.prof[m.prof.length - 1] || {};
+  const profPrev = m.prof[m.prof.length - 2] || {};
+  const levLast = m.lev[m.lev.length - 1] || {};
+  const cfLast = m.cf[m.cf.length - 1] || {};
+
+  if (yoyLast?.revenue_growth != null) {
+    if (yoyLast.revenue_growth >= 15) S(`Revenue +${yoyLast.revenue_growth.toFixed(1)}% YoY`, `نمو الإيرادات +${yoyLast.revenue_growth.toFixed(1)}% سنوياً`);
+    else if (yoyLast.revenue_growth < 0) R(`Revenue shrinking (${yoyLast.revenue_growth.toFixed(1)}% YoY)`, `الإيرادات تنكمش (${yoyLast.revenue_growth.toFixed(1)}% سنوياً)`);
+  }
+  if (lat.net_income != null && lat.net_income <= 0) R('Loss-making (negative net income)', 'خاسرة (صافي دخل سالب)');
+  if (profLast.net_margin != null) {
+    if (profLast.net_margin >= 20) S(`Net margin ${profLast.net_margin.toFixed(1)}%`, `هامش صافي ${profLast.net_margin.toFixed(1)}%`);
+    else if (profLast.net_margin > 0 && profLast.net_margin < 5) R(`Thin net margin (${profLast.net_margin.toFixed(1)}%)`, `هامش صافي ضعيف (${profLast.net_margin.toFixed(1)}%)`);
+  }
+  if (profLast.net_margin != null && profPrev.net_margin != null) {
+    const d = profLast.net_margin - profPrev.net_margin;
+    if (d >= 2) S('Margins expanding', 'الهوامش تتوسع');
+    else if (d <= -2) R('Margins compressing', 'الهوامش تنضغط');
+  }
+  if (profLast.roe != null) {
+    if (profLast.roe >= 20) S(`ROE ${profLast.roe.toFixed(0)}%`, `عائد على الملكية ${profLast.roe.toFixed(0)}%`);
+    else if (profLast.roe >= 0 && profLast.roe < 8) R(`Low ROE (${profLast.roe.toFixed(1)}%)`, `عائد ملكية منخفض (${profLast.roe.toFixed(1)}%)`);
+  }
+  if (levLast.dte != null) {
+    if (levLast.dte <= 0.5) S(`Low leverage (D/E ${levLast.dte.toFixed(2)}x)`, `مديونية منخفضة (${levLast.dte.toFixed(2)}x)`);
+    else if (levLast.dte >= 2) R(`High leverage (D/E ${levLast.dte.toFixed(1)}x)`, `مديونية مرتفعة (${levLast.dte.toFixed(1)}x)`);
+  }
+  if (cfLast.fcf != null && lat.revenue > 0) {
+    const fm = cfLast.fcf / lat.revenue * 100;
+    if (cfLast.fcf <= 0) R('Burning cash (negative FCF)', 'تحرق النقد (تدفق حر سالب)');
+    else if (fm >= 15) S(`FCF margin ${fm.toFixed(0)}%`, `هامش تدفق حر ${fm.toFixed(0)}%`);
+  }
+  if (cfLast.ocf_to_ni != null) {
+    if (cfLast.ocf_to_ni >= 1.1) S('Earnings backed by cash (OCF > NI)', 'الأرباح مدعومة بالنقد');
+    else if (cfLast.ocf_to_ni > 0 && cfLast.ocf_to_ni < 0.6) R('Weak cash conversion (OCF ≪ NI)', 'تحويل نقدي ضعيف');
+  }
+  if (stk.dividendYield && stk.dividendYield * 1 >= 2) S(`Dividend yield ${Number(stk.dividendYield).toFixed(1)}%`, `عائد توزيعات ${Number(stk.dividendYield).toFixed(1)}%`);
+  const est = (ESTIMATES[ticker] || []).filter(e => e.epsAvg && new Date(e.date) > new Date()).sort((a, b) => a.date.localeCompare(b.date))[0];
+  if (est && lat.eps_diluted > 0) {
+    const g = (est.epsAvg / lat.eps_diluted - 1) * 100;
+    if (g >= 15) S(`Analysts see EPS +${g.toFixed(0)}% next FY`, `المحللون يتوقعون نمو ربحية السهم +${g.toFixed(0)}%`);
+    else if (g < 0) R(`Analysts see EPS declining (${g.toFixed(0)}%)`, `المحللون يتوقعون تراجع ربحية السهم (${g.toFixed(0)}%)`);
+  }
+
+  // Data confidence (completeness + freshness), not an opinion score
+  let conf = 95;
+  const maxYear = _dbMaxYear();
+  if (m.rows.length < 4) conf -= 10;
+  if (!(stk.pe > 0) && !(cfLast.fcf > 0)) conf -= 15;
+  if (lat.year && maxYear && lat.year < maxYear - 1) conf -= 15;
+  if (!stk.price) conf -= 10;
+  conf = Math.max(30, conf);
+  const confLbl = conf >= 80 ? L('High', 'عالية') : conf >= 60 ? L('Medium', 'متوسطة') : L('Low', 'منخفضة');
+
+  return {
+    icon, label, color, valLine, val, quality: q,
+    strengths: strengths.slice(0, 3), risks: risks.slice(0, 3),
+    conf, confLbl, ig,
+    stale: !!(lat.year && maxYear && lat.year < maxYear - 1), latestYear: lat.year, maxYear,
+  };
+}
+
+function renderDecisionCard(ticker, m, scores) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  let v;
+  try { v = computeVerdict(ticker, m, scores); } catch (e) { console.warn('verdict failed', e); return ''; }
+  const ig = v.ig;
+
+  // Journal payload: rationale text saved with the pick
+  _lastVerdict = {
+    ticker,
+    confidence: v.conf,
+    summary: `[Snapshot verdict] ${v.icon} ${v.label}. ${v.valLine}. Strengths: ${v.strengths.join('; ') || '—'}. Risks: ${v.risks.join('; ') || '—'}.`
+      + (ig && !ig.negative ? ` Priced-in 10y FCF growth ≈ ${ig.implied.toFixed(0)}%/yr (r=10%).` : ''),
+  };
+
+  const li = (arr, cls) => arr.length
+    ? `<ul class="dc-ul ${cls}">${arr.map(x => `<li>${x}</li>`).join('')}</ul>`
+    : `<div class="dc-none">${L('None flagged', 'لا شيء بارز')}</div>`;
+
+  // "What's priced in" column
+  let pricedHtml;
+  if (!ig) {
+    pricedHtml = `<div class="dc-none" style="margin-top:8px">${L('Not enough data (needs market cap + free cash flow).', 'لا تتوفر بيانات كافية (يتطلب القيمة السوقية والتدفق الحر).')}</div>`;
+  } else if (ig.negative) {
+    pricedHtml = `<div class="dc-big" style="color:var(--red)">${L('FCF negative', 'تدفق حر سالب')}</div>
+      <div class="dc-sub">${L('Free cash flow is negative — today\'s price rests on a future turnaround, not current cash generation.', 'التدفق النقدي الحر سالب — السعر الحالي يراهن على تحوّل مستقبلي لا على النقد الحالي.')}</div>`;
+  } else {
+    const cmp = (ig.analyst != null)
+      ? (ig.implied > ig.analyst + 3
+          ? `<span class="dc-chip warn">${L('Price assumes MORE growth than analysts forecast', 'السعر يفترض نمواً أعلى من توقعات المحللين')}</span>`
+          : ig.implied < ig.analyst - 3
+            ? `<span class="dc-chip ok">${L('Price assumes LESS growth than analysts forecast', 'السعر يفترض نمواً أقل من توقعات المحللين')}</span>`
+            : `<span class="dc-chip">${L('Roughly in line with analyst expectations', 'متوافق تقريباً مع توقعات المحللين')}</span>`)
+      : '';
+    pricedHtml = `
+      <div class="dc-big">≈ ${ig.implied.toFixed(0)}%<span class="dc-big-unit">/${L('yr', 'سنة')}</span></div>
+      <div class="dc-sub">${L('FCF growth for 10 years implied by the current price (10% discount, 2.5% terminal)', 'نمو التدفق الحر لعشر سنوات الذي يفترضه السعر الحالي (خصم 10%، نمو نهائي 2.5%)')}</div>
+      <div class="dc-rows">
+        ${ig.trailing != null ? `<div class="dc-row"><span>${L('Actual FCF growth (last 3y)', 'النمو الفعلي (آخر 3 سنوات)')}</span><b>${ig.trailing >= 0 ? '+' : ''}${ig.trailing.toFixed(0)}%/${L('yr', 'سنة')}</b></div>` : ''}
+        ${ig.analyst != null ? `<div class="dc-row"><span>${L('Analysts\' fwd revenue growth', 'نمو الإيرادات المتوقع من المحللين')}</span><b>${ig.analyst >= 0 ? '+' : ''}${ig.analyst.toFixed(0)}%/${L('yr', 'سنة')}</b></div>` : ''}
+        <div class="dc-row dc-row-dim"><span>${L('If discount rate 8% / 12%', 'لو معدل الخصم 8% / 12%')}</span><b>${ig.sens8.toFixed(0)}% / ${ig.sens12.toFixed(0)}%</b></div>
+        <div class="dc-row dc-row-dim"><span>P/FCF</span><b>${ig.pFcf.toFixed(1)}x</b></div>
+      </div>
+      ${cmp}`;
+  }
+
+  return `<div class="decision-card" id="decisionCard">
+    <div class="dc-col">
+      <div class="dc-head">🧭 ${L('Snapshot Verdict', 'الحكم السريع')}
+        <span class="dc-conf" title="${L('Based on data completeness & freshness', 'حسب اكتمال البيانات وحداثتها')}">${L('Data confidence', 'موثوقية البيانات')}: ${v.confLbl}${v.stale ? ' · ⚠ ' + L('financials lag the rest of the DB', 'البيانات متأخرة عن بقية القاعدة') : ''}</span>
+      </div>
+      <div class="dc-label" style="color:${v.color}">${v.icon} ${v.label}</div>
+      <div class="dc-val-line">${v.valLine}</div>
+      <div class="dc-lists">
+        <div><div class="dc-list-h ok">✓ ${L('Strengths', 'نقاط القوة')}</div>${li(v.strengths, 'ok')}</div>
+        <div><div class="dc-list-h warn">⚠ ${L('Risks', 'المخاطر')}</div>${li(v.risks, 'warn')}</div>
+      </div>
+    </div>
+    <div class="dc-col">
+      <div class="dc-head">⚖️ ${L("What's priced in?", 'ما الذي يسعّره السوق؟')}</div>
+      ${pricedHtml}
+    </div>
+    <div class="dc-note">${L('Rule-based snapshot computed locally from the financials — educational, not investment advice.', 'لمحة آلية محسوبة محلياً من القوائم المالية — لأغراض تعليمية وليست نصيحة استثمارية.')}</div>
+  </div>`;
+}
+
 function loadTickerIntoDash(ticker) {
   _dashTarget = document.getElementById('dashPanelContent');
   loadTicker(ticker);
@@ -5733,6 +5983,9 @@ function loadTicker(ticker) {
       <span class="ins-icon">${i.icon}</span><span class="ins-txt">${i.text}</span>
     </div>`).join('');
 
+    // Decision card (rule-based verdict + reverse-DCF; token-free)
+    const decisionHtml = renderDecisionCard(ticker, m, scores);
+
     (_dashTarget || document.getElementById('dashFullView') || document.getElementById('mainArea')).innerHTML = `
     <div class="db">
       <div class="db-hdr">
@@ -5759,6 +6012,7 @@ function loadTicker(ticker) {
 
       ${stkHtml}
       ${rangeHtml}
+      ${decisionHtml}
 
       <div class="price-chart-wrap" id="priceChartWrap">
         <div class="price-chart-header">
