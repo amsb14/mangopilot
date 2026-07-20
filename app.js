@@ -5985,6 +5985,195 @@ function renderCompanyProfile(ticker) {
   </div>`;
 }
 
+// ── STRATEGY BACKTEST (rule-based, token-free) ───────────────────────────────
+// Honest backtest of the app's Quality Score signal: each January, hold the top-N by
+// POINT-IN-TIME quality (scored only from fiscal years before that year), equal-weight,
+// rebalanced annually; compare $1 in the strategy vs $1 in SPY.
+// Loud caveats shown in the UI: survivorship bias (universe = today's survivors), short
+// window, annual-reporting-lag assumption, no costs/taxes/slippage. Not investment advice.
+let _backtestRunning = false;
+
+async function fetchEodHistory(symbol, fromDate) {
+  const res = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=${symbol}&from=${fromDate}&apikey=${FMP_QUOTE_KEY}`);
+  if (!res.ok) throw new Error(`price ${symbol}: HTTP ${res.status}`);
+  const arr = await res.json();
+  if (!Array.isArray(arr)) return null;
+  const rows = arr.filter(r => r && r.date && r.price != null).sort((a, b) => a.date.localeCompare(b.date));
+  if (!rows.length) return null;
+  return { map: new Map(rows.map(r => [r.date, r.price])), dates: rows.map(r => r.date) };
+}
+function _priceOnOrBefore(h, dateStr) {
+  if (!h) return null;
+  if (h.map.has(dateStr)) return h.map.get(dateStr);
+  const d = h.dates; let lo = 0, hi = d.length - 1, ans = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (d[m] <= dateStr) { ans = m; lo = m + 1; } else hi = m - 1; }
+  return ans >= 0 ? h.map.get(d[ans]) : null;
+}
+function _priceOnOrAfter(h, dateStr) {
+  if (!h) return null;
+  if (h.map.has(dateStr)) return h.map.get(dateStr);
+  const d = h.dates; let lo = 0, hi = d.length - 1, ans = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (d[m] >= dateStr) { ans = m; hi = m - 1; } else lo = m + 1; }
+  return ans >= 0 ? h.map.get(d[ans]) : null;
+}
+function _pointInTimeTopN(year, N) {
+  const scored = [];
+  for (const t of TICKERS) {
+    const rows = (ANNUAL[t] || []).filter(r => r.year < year); // only fiscal years BEFORE the rebalance year
+    if (rows.length < 2) continue;
+    if (!(STOCK[t]?.marketCap >= 2e9)) continue; // investability filter (uses today's mcap — disclosed)
+    const s = calcScores(calcMetrics(rows)).overall;
+    if (s != null) scored.push({ t, s });
+  }
+  scored.sort((a, b) => b.s - a.s);
+  return scored.slice(0, N).map(x => x.t);
+}
+
+async function runStrategyBacktest() {
+  if (_backtestRunning) return;
+  _backtestRunning = true;
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const N = 15;
+  const target = getMainTarget();
+  const prog = (msg) => { target.innerHTML = `<div class="bt-loading"><div class="loader"><div class="spin"></div></div><div style="margin-top:14px;color:var(--text2);font-size:13px">${msg}</div></div>`; };
+
+  try {
+    prog(L('Selecting portfolios (point-in-time quality)…', 'اختيار المحافظ (جودة لحظية)…'));
+    let minY = Infinity, maxY = 0;
+    TICKERS.forEach(t => (ANNUAL[t] || []).forEach(r => { if (r.year < minY) minY = r.year; if (r.year > maxY) maxY = r.year; }));
+    const nowYear = new Date().getFullYear();
+    const firstYear = minY + 2;                       // need ≥2 prior fiscal years to score
+    const lastYear = Math.min(nowYear, maxY + 1);
+    const years = [];
+    for (let y = firstYear; y <= lastYear; y++) years.push(y);
+    if (years.length < 2) throw new Error(L('Not enough price/financial history to backtest.', 'لا يوجد تاريخ كافٍ للاختبار.'));
+
+    const picksByYear = {};
+    const union = new Set(['SPY']);
+    years.forEach(y => { picksByYear[y] = _pointInTimeTopN(y, N); picksByYear[y].forEach(t => union.add(t)); });
+
+    // Fetch daily closes for every ticker ever held + SPY (paced under FMP's rate cap)
+    const fromDate = `${firstYear - 1}-11-01`;
+    const symbols = [...union];
+    const hist = {};
+    let fetched = 0;
+    for (let i = 0; i < symbols.length; i += FMP_RATE.BATCH) {
+      const slice = symbols.slice(i, i + FMP_RATE.BATCH), t0 = Date.now();
+      const results = await Promise.all(slice.map(s => fetchEodHistory(s, fromDate).catch(() => null)));
+      slice.forEach((s, k) => { if (results[k]) hist[s] = results[k]; });
+      fetched += slice.length;
+      prog(L(`Fetching historical prices… ${fetched}/${symbols.length}`, `جلب الأسعار التاريخية… ${fetched}/${symbols.length}`));
+      if (i + FMP_RATE.BATCH < symbols.length) { const el = Date.now() - t0; if (el < FMP_RATE.MIN_CYCLE_MS) await new Promise(r => setTimeout(r, FMP_RATE.MIN_CYCLE_MS - el)); }
+    }
+    if (!hist.SPY) throw new Error(L('Could not fetch SPY prices (check FMP key / network).', 'تعذّر جلب أسعار SPY.'));
+
+    prog(L('Computing equity curve…', 'حساب منحنى العائد…'));
+    const axis = hist.SPY.dates.filter(d => { const y = +d.slice(0, 4); return y >= firstYear && y <= lastYear; });
+    const startPx = {};
+    years.forEach(y => picksByYear[y].forEach(t => { startPx[`${y}:${t}`] = _priceOnOrAfter(hist[t], `${y}-01-01`); }));
+    const spy0 = _priceOnOrAfter(hist.SPY, `${firstYear}-01-01`);
+
+    const labels = [], stratCurve = [], spyCurve = [];
+    let capital = 1, lastStrat = 1, curYear = null;
+    for (const d of axis) {
+      const y = +d.slice(0, 4);
+      if (curYear === null) curYear = y;
+      if (y !== curYear) { capital = lastStrat; curYear = y; }
+      let sum = 0, cnt = 0;
+      for (const t of picksByYear[y] || []) {
+        const sp = startPx[`${y}:${t}`]; if (!sp) continue;
+        const px = _priceOnOrBefore(hist[t], d); if (px == null) continue;
+        sum += px / sp; cnt++;
+      }
+      if (!cnt) continue;
+      lastStrat = capital * (sum / cnt);
+      labels.push(d); stratCurve.push(lastStrat); spyCurve.push(_priceOnOrBefore(hist.SPY, d) / spy0);
+    }
+    if (!labels.length) throw new Error(L('No overlapping price data to plot.', 'لا توجد بيانات أسعار متطابقة.'));
+
+    // Per-year returns from the curve
+    const byYear = {};
+    labels.forEach((d, i) => { const y = +d.slice(0, 4); (byYear[y] ||= { s0: stratCurve[i], b0: spyCurve[i] }); byYear[y].s1 = stratCurve[i]; byYear[y].b1 = spyCurve[i]; });
+    const yearRows = years.filter(y => byYear[y]).map(y => {
+      const b = byYear[y], sr = (b.s1 / b.s0 - 1) * 100, spr = (b.b1 / b.b0 - 1) * 100;
+      return { year: y, strat: sr, spy: spr, win: sr > spr, picks: picksByYear[y], partial: y === nowYear };
+    });
+
+    renderBacktestView({
+      N, labels, stratCurve, spyCurve,
+      stratFinal: stratCurve[stratCurve.length - 1], spyFinal: spyCurve[spyCurve.length - 1],
+      years: yearRows, hit: yearRows.filter(r => r.win).length,
+    });
+  } catch (e) {
+    target.innerHTML = `<div class="bt-loading"><div style="color:var(--red);font-size:14px">❌ ${escHtml(e.message || String(e))}</div>
+      <button class="act-btn" style="margin-top:14px" onclick="backToChat()">← ${L('Back', 'رجوع')}</button></div>`;
+  } finally {
+    _backtestRunning = false;
+  }
+}
+
+function renderBacktestView(bt) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const pct = v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+  const finalS = (bt.stratFinal - 1) * 100, finalB = (bt.spyFinal - 1) * 100, beat = finalS - finalB;
+  const target = getMainTarget();
+
+  const yearRows = bt.years.map(r => `<tr>
+    <td>${r.year}${r.partial ? ' <span style="color:var(--text3);font-size:10px">YTD</span>' : ''}</td>
+    <td class="${r.strat >= 0 ? 'pos' : 'neg'}">${pct(r.strat)}</td>
+    <td class="${r.spy >= 0 ? 'pos' : 'neg'}">${pct(r.spy)}</td>
+    <td>${r.win ? `<span style="color:var(--green)">✓ ${L('Beat', 'تفوّق')}</span>` : `<span style="color:var(--red)">✕ ${L('Lagged', 'تخلّف')}</span>`}</td>
+    <td style="color:var(--text3);font-size:11px">${r.picks.slice(0, 8).join(', ')}${r.picks.length > 8 ? '…' : ''}</td>
+  </tr>`).join('');
+
+  target.innerHTML = `<div class="backtest-view">
+    <div class="bt-hdr">
+      <div>
+        <div class="bt-title">📈 ${L('Strategy Backtest', 'اختبار الاستراتيجية تاريخياً')}</div>
+        <div class="bt-sub">${L(`Top ${bt.N} by point-in-time Quality Score · equal-weight · rebalanced each January · vs SPY`, `أفضل ${bt.N} حسب درجة الجودة اللحظية · وزن متساوٍ · إعادة توازن كل يناير · مقابل SPY`)}</div>
+      </div>
+      <button class="act-btn" onclick="backToChat()">← ${L('Back', 'رجوع')}</button>
+    </div>
+
+    <div class="bt-warn">
+      <b>⚠️ ${L('Illustration, not proof — and NOT investment advice.', 'توضيح وليس دليلاً — وليست نصيحة استثمارية.')}</b>
+      ${L('It tests only companies that still exist today (survivorship bias inflates results), over a short window, and assumes each year\'s prior annual report was known at year start. Trading costs, taxes, and slippage are not modeled. Past performance does not predict the future.', 'يختبر فقط الشركات الموجودة اليوم (تحيّز البقاء يضخّم النتائج)، على مدى قصير، ويفترض أن التقرير السنوي السابق كان معروفاً في بداية العام. تكاليف التداول والضرائب والانزلاق غير محتسبة. الأداء السابق لا يتنبأ بالمستقبل.')}
+    </div>
+
+    <div class="bt-cards">
+      <div class="bt-card"><div class="bt-card-lbl">${L('Quality strategy', 'استراتيجية الجودة')}</div><div class="bt-card-num" style="color:${finalS >= 0 ? 'var(--green)' : 'var(--red)'}">$${bt.stratFinal.toFixed(2)}</div><div class="bt-card-sub">${pct(finalS)} · $1 →</div></div>
+      <div class="bt-card"><div class="bt-card-lbl">SPY (${L('buy & hold', 'شراء واحتفاظ')})</div><div class="bt-card-num">$${bt.spyFinal.toFixed(2)}</div><div class="bt-card-sub">${pct(finalB)} · $1 →</div></div>
+      <div class="bt-card"><div class="bt-card-lbl">${L('Excess vs SPY', 'الفائض مقابل SPY')}</div><div class="bt-card-num" style="color:${beat >= 0 ? 'var(--green)' : 'var(--red)'}">${pct(beat)}</div><div class="bt-card-sub">${beat >= 0 ? L('outperformed', 'تفوّقت') : L('underperformed', 'تخلّفت')}</div></div>
+      <div class="bt-card"><div class="bt-card-lbl">${L('Years beating SPY', 'سنوات التفوّق')}</div><div class="bt-card-num">${bt.hit}/${bt.years.length}</div><div class="bt-card-sub">${L('hit rate', 'نسبة الإصابة')} ${Math.round(bt.hit / bt.years.length * 100)}%</div></div>
+    </div>
+
+    <div class="bt-chart-wrap"><canvas id="btEquity"></canvas></div>
+
+    <div class="tbl-card" style="margin-top:16px"><div class="tbl-scroll"><table>
+      <thead><tr><th>${L('Year', 'السنة')}</th><th>${L('Strategy', 'الاستراتيجية')}</th><th>SPY</th><th>${L('Result', 'النتيجة')}</th><th>${L('That year\'s holdings', 'مراكز ذلك العام')}</th></tr></thead>
+      <tbody>${yearRows}</tbody>
+    </table></div></div>
+
+    <div class="bt-method">${L(`Method: each January, rank the universe by the same 0–10 Quality Score used across the app — computed only from fiscal years ending before that year — take the top ${bt.N} (min $2B market cap today), hold equal-weight for the year, repeat. Prices are FMP daily closes. Scoring has no look-ahead; the survivorship and reporting-lag caveats above still apply.`, `الطريقة: في كل يناير، رتّب الكون حسب درجة الجودة نفسها (0–10) — محسوبة فقط من السنوات المالية قبل ذلك العام — وخذ أفضل ${bt.N} (حد أدنى 2 مليار قيمة سوقية)، واحتفظ بها بوزن متساوٍ، وكرّر. الأسعار إغلاقات FMP اليومية.`)}</div>
+  </div>`;
+
+  const gc = getChartColors();
+  mk('btEquity', {
+    type: 'line',
+    data: { labels: bt.labels, datasets: [
+      { label: L('Quality strategy', 'استراتيجية الجودة'), data: bt.stratCurve, borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,.08)', borderWidth: 2, pointRadius: 0, tension: .1, fill: true },
+      { label: 'SPY', data: bt.spyCurve, borderColor: '#94a3b8', borderWidth: 1.5, pointRadius: 0, tension: .1, borderDash: [5, 4] },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: true, labels: { color: gc.legend } }, tooltip: { callbacks: { title: items => items[0]?.label, label: c => `${c.dataset.label}: $${c.parsed.y.toFixed(2)}` } } },
+      scales: scOpts({ x: { ticks: { color: gc.tick, maxTicksLimit: 8, autoSkip: true }, grid: { display: false } }, y: { ticks: { color: gc.tick, callback: v => '$' + v.toFixed(1) }, grid: { color: gc.grid } } }),
+    }
+  });
+}
+
 function loadTickerIntoDash(ticker) {
   _dashTarget = document.getElementById('dashPanelContent');
   loadTicker(ticker);
