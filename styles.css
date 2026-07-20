@@ -1098,3 +1098,7 @@ body.light .chat-welcome-icon{background:rgba(59,130,246,.06);border-color:rgba(
 .sctx-chip.down .sctx-arrow{color:var(--red)}
 .sctx-chip.flat .sctx-arrow{color:var(--text3)}
 @media(max-width:900px){.sctx-body{gap:12px}.sctx-chips{min-width:0}}
+
+/* Add/sync affordance pinned to the top of the search dropdown (always reachable) */
+.hdr-search-sync.hdr-sync-top{border-top:none;border-bottom:1px dashed rgba(59,130,246,.3);border-radius:10px 10px 0 0}
+.hdr-search-sync.hdr-sync-top.hdr-sync-disabled{border-bottom:1px dashed var(--border)}

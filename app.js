@@ -514,19 +514,50 @@ function onHdrSearch() {
   const drop = document.getElementById('hdrDrop');
   if (!q || !TICKERS.length) { drop.classList.remove('open'); return; }
 
-  dropItems = TICKERS.filter(t =>
-    t.toLowerCase().includes(q) ||
-    (STOCK[t]?.industry||'').toLowerCase().includes(q) ||
-    (STOCK[t]?.sector||'').toLowerCase().includes(q)
-  ).slice(0, 12);
+  // Relevance-ranked matching so an exact ticker (e.g. "MU") always surfaces first and is
+  // never dropped by an alphabetical slice. Sector/industry matching only applies to queries
+  // ≥3 chars — otherwise a short query like "mu" matches every "Com·mu·nication Services" name.
+  const allowCat = q.length >= 3;
+  const scored = [];
+  for (const t of TICKERS) {
+    const tl = t.toLowerCase();
+    const name = (STOCK[t]?.companyName || '').toLowerCase();
+    let rank;
+    if (tl === q) rank = 0;
+    else if (tl.startsWith(q)) rank = 1;
+    else if (name.startsWith(q)) rank = 2;
+    else if (tl.includes(q)) rank = 3;
+    else if (allowCat && name.includes(q)) rank = 4;
+    else if (allowCat && ((STOCK[t]?.industry || '').toLowerCase().includes(q) || (STOCK[t]?.sector || '').toLowerCase().includes(q))) rank = 5;
+    else continue;
+    scored.push({ t, rank });
+  }
+  scored.sort((a, b) => a.rank - b.rank || a.t.localeCompare(b.t));
+  dropItems = scored.slice(0, 12).map(x => x.t);
 
   const isAr = lang === 'ar';
-  // If the query looks like a plausible new ticker symbol (1-5 uppercase letters, alphanumeric),
-  // offer to sync it from FMP — only when signed in.
+  // If the query looks like a plausible ticker symbol not already loaded, offer to sync it.
   const upperQ = q.toUpperCase();
   const looksLikeTicker = /^[A-Z][A-Z.-]{0,5}$/.test(upperQ);
   const notInUniverse = looksLikeTicker && !TICKERS.includes(upperQ);
   const canSync = notInUniverse && isAiReady();
+
+  // Build the add/sync affordance FIRST so it's always reachable, never buried under matches.
+  let addHtml = '';
+  if (canSync) {
+    addHtml = `<div class="hdr-search-sync hdr-sync-top" onclick="addTickerFromSearch('${upperQ}')" id="addTickerBtn">
+      <div class="hdr-sync-icon">➕</div>
+      <div class="hdr-sync-text">
+        <div class="hdr-sync-title">${isAr ? `إضافة ${upperQ}` : `Add ${upperQ}`}</div>
+        <div class="hdr-sync-sub">${isAr ? 'مزامنة من FMP → أضِفه إلى الكون (~5 ثوانٍ)' : `Sync from FMP → add ${upperQ} to your universe (~5s)`}</div>
+      </div>
+    </div>`;
+  } else if (notInUniverse && !isAiReady()) {
+    addHtml = `<div class="hdr-search-sync hdr-sync-top hdr-sync-disabled">
+      <div class="hdr-sync-icon">🔒</div>
+      <div class="hdr-sync-text"><div class="hdr-sync-title">${isAr ? `سجّل الدخول لإضافة ${upperQ}` : `Sign in to add ${upperQ}`}</div></div>
+    </div>`;
+  }
 
   let itemsHtml = dropItems.map((t, i) =>
     `<div class="hdr-search-item" onclick="pickTicker('${t}')" id="drop-item-${i}">
@@ -535,30 +566,11 @@ function onHdrSearch() {
     </div>`
   ).join('');
 
-  if (!itemsHtml && !canSync) {
-    itemsHtml = '<div style="padding:12px 14px;font-size:13px;color:var(--text2)">No results</div>';
+  if (!itemsHtml && !addHtml) {
+    itemsHtml = `<div style="padding:12px 14px;font-size:13px;color:var(--text2)">${isAr ? 'لا نتائج' : 'No results'}</div>`;
   }
 
-  // Add "Sync new ticker" affordance when applicable
-  if (canSync) {
-    const hint = dropItems.length
-      ? (isAr ? `لا ترى ${upperQ}؟` : `Don't see ${upperQ}?`)
-      : (isAr ? `لم يتم العثور على ${upperQ}` : `${upperQ} not found in your universe`);
-    itemsHtml += `<div class="hdr-search-sync" onclick="addTickerFromSearch('${upperQ}')" id="addTickerBtn">
-      <div class="hdr-sync-icon">➕</div>
-      <div class="hdr-sync-text">
-        <div class="hdr-sync-title">${hint}</div>
-        <div class="hdr-sync-sub">${isAr ? 'انقر لإضافته إلى الكون (~5 ثوانٍ)' : `Sync from FMP → add ${upperQ} to your universe (~5s)`}</div>
-      </div>
-    </div>`;
-  } else if (notInUniverse && !isAiReady()) {
-    itemsHtml += `<div class="hdr-search-sync hdr-sync-disabled">
-      <div class="hdr-sync-icon">🔒</div>
-      <div class="hdr-sync-text"><div class="hdr-sync-title">${isAr ? 'سجّل الدخول لإضافة رموز جديدة' : 'Sign in to add new tickers'}</div></div>
-    </div>`;
-  }
-
-  drop.innerHTML = itemsHtml;
+  drop.innerHTML = addHtml + itemsHtml;
   drop.classList.add('open');
   dropIdx = -1;
 }
