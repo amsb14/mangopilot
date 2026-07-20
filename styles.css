@@ -1056,3 +1056,22 @@ body.light .chat-welcome-icon{background:rgba(59,130,246,.06);border-color:rgba(
   .decision-card{grid-template-columns:1fr}
   .decision-card .dc-col+.dc-col{border-inline-start:none;border-top:1px solid var(--border)}
 }
+
+/* ── Company profile / About card ── */
+.company-profile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;margin-bottom:16px}
+.cp-head{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.cp-logo{width:40px;height:40px;border-radius:9px;object-fit:contain;background:#fff;padding:3px;border:1px solid var(--border);flex-shrink:0}
+.cp-head-txt{min-width:0}
+.cp-title{font-family:var(--display);font-size:18px;line-height:1.2}
+.cp-sub{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
+.cp-desc{font-size:13px;line-height:1.6;color:var(--text2);margin:0 0 12px}
+.cp-desc .cp-desc-full{display:none}
+.cp-desc.expanded .cp-desc-short{display:none}
+.cp-desc.expanded .cp-desc-full{display:inline}
+.cp-more{background:none;border:none;color:var(--accent);font-weight:600;font-size:12px;cursor:pointer;font-family:var(--font);padding:0 2px;white-space:nowrap}
+.cp-more:hover{text-decoration:underline}
+.cp-facts{display:flex;flex-wrap:wrap;gap:8px}
+.cp-fact{display:flex;flex-direction:column;gap:1px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;min-width:0}
+.cp-fact-k{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
+.cp-fact-v{font-size:12.5px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.cp-src{font-size:10px;color:var(--text3);margin-top:10px}

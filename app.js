@@ -5835,6 +5835,61 @@ function renderDecisionCard(ticker, m, scores) {
   </div>`;
 }
 
+// ── COMPANY PROFILE / "About" card (token-free — renders data already synced) ──
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderCompanyProfile(ticker) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const stk = STOCK[ticker] || {};
+  const desc = (stk.description || '').trim();
+  const name = stk.companyName || ticker;
+  if (!desc && !stk.ceo && !stk.employees && !stk.sector) return '';
+
+  // Key facts (only those we actually have)
+  const facts = [];
+  if (stk.sector)   facts.push([L('Sector', 'القطاع'), stk.sector]);
+  if (stk.industry) facts.push([L('Industry', 'الصناعة'), stk.industry]);
+  if (stk.ceo)      facts.push([L('CEO', 'الرئيس التنفيذي'), stk.ceo]);
+  if (stk.employees) facts.push([L('Employees', 'الموظفون'), Number(stk.employees).toLocaleString()]);
+  if (stk.country)  facts.push([L('HQ', 'المقر'), stk.country]);
+  if (stk.exchange) facts.push([L('Exchange', 'البورصة'), stk.exchange]);
+  if (stk.ipoDate)  facts.push([L('IPO', 'الإدراج'), String(stk.ipoDate).slice(0, 10)]);
+  if (stk.beta != null && !isNaN(Number(stk.beta))) facts.push(['Beta', Number(stk.beta).toFixed(2)]);
+  const factsHtml = facts.map(([k, v]) =>
+    `<div class="cp-fact"><span class="cp-fact-k">${escHtml(k)}</span><span class="cp-fact-v" title="${escHtml(v)}">${escHtml(v)}</span></div>`).join('');
+
+  // Description — concise by default, expandable if long
+  let descHtml = '';
+  if (desc) {
+    const SHORT = 260;
+    if (desc.length > SHORT + 40) {
+      const shortTxt = desc.slice(0, SHORT).replace(/\s+\S*$/, '') + '…';
+      descHtml = `<p class="cp-desc"><span class="cp-desc-short">${escHtml(shortTxt)}</span><span class="cp-desc-full">${escHtml(desc)}</span> <button class="cp-more" onclick="const p=this.closest('.cp-desc');const e=p.classList.toggle('expanded');this.textContent=e?'${L('Show less', 'عرض أقل')}':'${L('Read more', 'اقرأ المزيد')}'">${L('Read more', 'اقرأ المزيد')}</button></p>`;
+    } else {
+      descHtml = `<p class="cp-desc expanded"><span class="cp-desc-full">${escHtml(desc)}</span></p>`;
+    }
+  }
+
+  const logo = stk.image ? `<img class="cp-logo" src="${escHtml(stk.image)}" alt="" loading="lazy" onerror="this.style.display='none'"/>` : '';
+
+  return `<div class="company-profile">
+    <div class="cp-head">
+      ${logo}
+      <div class="cp-head-txt">
+        <div class="cp-title">📋 ${escHtml(name)}</div>
+        <div class="cp-sub">${L('Business profile', 'نبذة عن الشركة')}${stk.exchange ? ` · ${escHtml(stk.exchange)}: ${escHtml(ticker)}` : ''}</div>
+      </div>
+    </div>
+    ${descHtml}
+    ${factsHtml ? `<div class="cp-facts">${factsHtml}</div>` : ''}
+    <div class="cp-src">${L('Profile data via Financial Modeling Prep', 'بيانات الملف التعريفي عبر Financial Modeling Prep')}</div>
+  </div>`;
+}
+
 function loadTickerIntoDash(ticker) {
   _dashTarget = document.getElementById('dashPanelContent');
   loadTicker(ticker);
@@ -5985,6 +6040,8 @@ function loadTicker(ticker) {
 
     // Decision card (rule-based verdict + reverse-DCF; token-free)
     const decisionHtml = renderDecisionCard(ticker, m, scores);
+    // Company profile / "About" card (renders already-synced FMP profile data)
+    const profileHtml = renderCompanyProfile(ticker);
 
     (_dashTarget || document.getElementById('dashFullView') || document.getElementById('mainArea')).innerHTML = `
     <div class="db">
@@ -6013,6 +6070,7 @@ function loadTicker(ticker) {
       ${stkHtml}
       ${rangeHtml}
       ${decisionHtml}
+      ${profileHtml}
 
       <div class="price-chart-wrap" id="priceChartWrap">
         <div class="price-chart-header">
@@ -8051,7 +8109,7 @@ function mergeTickerLocally(item) {
       price: p.price, marketCap: p.market_cap, sector: p.sector,
       industry: p.industry, beta: p.beta, companyName: p.company_name,
       exchange: p.exchange, country: p.country, description: p.description,
-      ceo: p.ceo, employees: p.employees, image: p.image, pe: null,
+      ceo: p.ceo, employees: p.employees, image: p.image, ipoDate: p.ipo_date, pe: null,
       fiftyTwoWeekLow: p.range_52w ? parseFloat(String(p.range_52w).split('-')[0]) : null,
       fiftyTwoWeekHigh: p.range_52w ? parseFloat(String(p.range_52w).split('-')[1]) : null,
       dividendYield: p.last_dividend && p.price ? (p.last_dividend / p.price) : null,
@@ -8300,7 +8358,7 @@ async function loadFromSupabase() {
         price: p.price, marketCap: p.market_cap, sector: p.sector,
         industry: p.industry, beta: p.beta, companyName: p.company_name,
         exchange: p.exchange, country: p.country, description: p.description,
-        ceo: p.ceo, employees: p.employees, image: p.image, pe: null,
+        ceo: p.ceo, employees: p.employees, image: p.image, ipoDate: p.ipo_date, pe: null,
         fiftyTwoWeekLow: p.range_52w ? parseFloat(p.range_52w.split('-')[0]) : null,
         fiftyTwoWeekHigh: p.range_52w ? parseFloat(p.range_52w.split('-')[1]) : null,
         dividendYield: p.last_dividend && p.price ? (p.last_dividend / p.price) : null,
