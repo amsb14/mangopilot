@@ -171,12 +171,19 @@ let ANNUAL  = {};
 let QUARTERLY = {};
 let ESTIMATES = {};
 
+// Memoized per-sector / per-ticker computed stats — cleared whenever the universe reloads.
+let _sectorPECache = {};
+let _sectorScoreCache = {};
+let _overallScoreCache = {};
+function invalidateComputedCaches() { _sectorPECache = {}; _sectorScoreCache = {}; _overallScoreCache = {}; }
+
 function refreshGlobals() {
   TICKERS = Object.keys(DB_RAW.annual).sort();
   STOCK = DB_RAW.stock || {};
   ANNUAL = DB_RAW.annual || {};
   QUARTERLY = DB_RAW.quarterly || {};
   ESTIMATES = DB_RAW.estimates || {};
+  invalidateComputedCaches();
 }
 
 // ── I18N ──────────────────────────────────────────────────────────────────────
@@ -4806,7 +4813,7 @@ async function chatPerformanceScreen(text) {
 }
 
 // ── HEATMAP with DD-List metric filter ──────────────────────────────────────
-let _heatmapMetric = 'change';   // active coloring metric
+let _heatmapMetric = 'score';    // active coloring metric — default to local Quality (instant, no FMP calls)
 let _heatmapSector = null;        // null = all sectors; else a specific sector name
 const _heatmapNewsSent = {};      // ticker → net news sentiment (-N..+N), cached per session
 let _heatmapNewsLoading = false;
@@ -4878,6 +4885,8 @@ async function refreshHeatmapPrices() {
 // Metric definitions. `get` returns a numeric value per ticker. `type` drives coloring.
 function _latestAnnual(t) { const a = ANNUAL[t]; return a?.length ? a[a.length - 1] : null; }
 const HEATMAP_METRICS = {
+  score:      { label: 'Quality Score', ar: 'درجة الجودة', type: 'score', needsNews: false, get: t => _tickerOverallScore(t), fmt: v => v == null ? '—' : v.toFixed(1) },
+  valuation:  { label: 'Valuation (cheap→rich)', ar: 'التقييم (رخيص→غالٍ)', type: 'valuation', needsNews: false, get: t => { const p = computeSectorPE(t); return p ? p.pct : null; }, fmt: v => v == null ? '—' : v + '%' },
   change:     { label: 'Daily Change %', ar: 'التغير اليومي', type: 'diverging_pct', needsNews: false, get: t => STOCK[t]?.changePct, fmt: v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%' },
   mcap:       { label: 'Market Cap',     ar: 'القيمة السوقية', type: 'sequential', needsNews: false, get: t => STOCK[t]?.marketCap, fmt: v => v == null ? '—' : fM(v) },
   price:      { label: 'Price',          ar: 'السعر',         type: 'sequential', needsNews: false, get: t => STOCK[t]?.price, fmt: v => v == null ? '—' : '$' + v.toFixed(2) },
@@ -4901,6 +4910,14 @@ function _hmColorFor(value, metric, ctx) {
     if (n > 0.4) return '#0f766e'; if (n > 0.15) return '#10b981'; if (n > 0.01) return '#16654e';
     if (n >= -0.01) return HM_NEUTRAL;
     if (n > -0.15) return '#7f1d1d'; if (n > -0.4) return '#dc2626'; return '#991b1b';
+  }
+  if (metric.type === 'score') { // 0-10 quality score, fixed thresholds (green = higher quality)
+    if (value >= 8) return '#0f766e'; if (value >= 6.5) return '#10b981'; if (value >= 5.5) return '#16654e';
+    if (value >= 4.5) return '#1f3a4d'; if (value >= 3.5) return '#7f1d1d'; return '#991b1b';
+  }
+  if (metric.type === 'valuation') { // sector P/E percentile — low (cheap) = green, high (rich) = red
+    if (value <= 20) return '#0f766e'; if (value <= 40) return '#10b981'; if (value <= 55) return '#16654e';
+    if (value <= 75) return '#7f1d1d'; return '#991b1b';
   }
   if (metric.type === 'news_bull' || metric.type === 'news_bear') { // sentiment score
     if (value > 0) return value >= 2 ? '#0f766e' : '#16654e';
@@ -5598,17 +5615,83 @@ function _dbMaxYear() {
   return y;
 }
 
-// P/E standing within the ticker's sector (uses precomputed STOCK.pe — cheap)
+// P/E distribution within a sector (cached; token-free local math)
+function _sectorPEStats(sec) {
+  if (sec in _sectorPECache) return _sectorPECache[sec];
+  const pes = TICKERS.filter(t => STOCK[t]?.sector === sec && STOCK[t].pe > 0 && STOCK[t].pe < 200)
+    .map(t => STOCK[t].pe).sort((a, b) => a - b);
+  _sectorPECache[sec] = pes.length >= 5 ? { pes, median: pes[Math.floor(pes.length / 2)], count: pes.length } : null;
+  return _sectorPECache[sec];
+}
 function computeSectorPE(ticker) {
   const sec = STOCK[ticker]?.sector;
   if (!sec) return null;
-  const pes = TICKERS.filter(t => STOCK[t]?.sector === sec && STOCK[t].pe > 0 && STOCK[t].pe < 200)
-    .map(t => STOCK[t].pe).sort((a, b) => a - b);
-  if (pes.length < 5) return null;
-  const median = pes[Math.floor(pes.length / 2)];
+  const st = _sectorPEStats(sec);
+  if (!st) return null;
   const pe = STOCK[ticker]?.pe;
-  const pct = (pe > 0) ? Math.round(pes.filter(x => x <= pe).length / pes.length * 100) : null;
-  return { median, pct, count: pes.length };
+  const pct = (pe > 0) ? Math.round(st.pes.filter(x => x <= pe).length / st.pes.length * 100) : null;
+  return { median: st.median, pct, count: st.count };
+}
+
+// Memoized overall quality score for a ticker (used by the heatmap Quality metric)
+function _tickerOverallScore(t) {
+  if (t in _overallScoreCache) return _overallScoreCache[t];
+  const a = ANNUAL[t];
+  _overallScoreCache[t] = a?.length ? calcScores(calcMetrics(a)).overall : null;
+  return _overallScoreCache[t];
+}
+
+// Per-sector score stats: quality-rank map + category averages (cached)
+function _sectorScoreStats(sec) {
+  if (sec in _sectorScoreCache) return _sectorScoreCache[sec];
+  const members = TICKERS.filter(t => STOCK[t]?.sector === sec && ANNUAL[t]?.length);
+  if (members.length < 3) { _sectorScoreCache[sec] = null; return null; }
+  const rows = members.map(t => ({ t, ...calcScores(calcMetrics(ANNUAL[t])) }));
+  const byOverall = [...rows].sort((a, b) => (b.overall || 0) - (a.overall || 0));
+  const rankOf = {}; byOverall.forEach((r, i) => { rankOf[r.t] = i + 1; });
+  const avg = k => rows.reduce((a, r) => a + (r[k] || 0), 0) / rows.length;
+  _sectorScoreCache[sec] = { count: members.length, rankOf,
+    avg: { growth: avg('growth'), profitability: avg('profitability'), health: avg('health'), cashflow: avg('cashflow'), overall: avg('overall') } };
+  return _sectorScoreCache[sec];
+}
+
+// Feature 1: "how it ranks vs its sector" strip (token-free)
+function renderSectorContext(ticker, scores) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const sec = STOCK[ticker]?.sector;
+  if (!sec) return '';
+  const st = _sectorScoreStats(sec);
+  const rank = st && st.rankOf[ticker];
+  if (!st || !rank) return '';
+  const pe = computeSectorPE(ticker);
+  const rankPct = rank / st.count;
+  const rankColor = rankPct <= 0.25 ? 'var(--green)' : rankPct <= 0.6 ? 'var(--accent)' : 'var(--text2)';
+
+  const cats = [['overall', L('Overall', 'الإجمالي')], ['growth', L('Growth', 'النمو')], ['profitability', L('Profit', 'الربحية')], ['health', L('Health', 'الصحة')], ['cashflow', L('Cash', 'التدفق')]];
+  const chips = cats.map(([k, lbl]) => {
+    const v = scores[k], a = st.avg[k], d = v - a;
+    const cls = d >= 0.3 ? 'up' : d <= -0.3 ? 'down' : 'flat';
+    const arrow = d >= 0.3 ? '▲' : d <= -0.3 ? '▼' : '≈';
+    return `<div class="sctx-chip ${cls}"><span class="sctx-k">${lbl}</span><span class="sctx-v">${v.toFixed(1)} <span class="sctx-arrow">${arrow}</span></span><span class="sctx-avg">${L('avg', 'متوسط')} ${a.toFixed(1)}</span></div>`;
+  }).join('');
+
+  const valStat = (pe && pe.pct != null) ? `<div class="sctx-stat">
+      <span class="sctx-stat-num">${pe.pct}<span class="sctx-pct">%</span></span>
+      <span class="sctx-stat-lbl">${L('valuation percentile', 'المئين التقييمي')}<br>${L('(0 = cheapest)', '(0 = الأرخص)')}</span>
+    </div>` : '';
+
+  return `<div class="sector-context">
+    <div class="sctx-head">🏆 ${L('How it ranks in', 'ترتيبها في')} <b>${escHtml(sec)}</b> <span class="sctx-sub">· ${st.count} ${L('companies', 'شركة')}</span></div>
+    <div class="sctx-body">
+      <div class="sctx-stat">
+        <span class="sctx-stat-num" style="color:${rankColor}">#${rank}<span class="sctx-pct">/${st.count}</span></span>
+        <span class="sctx-stat-lbl">${L('by overall quality', 'حسب الجودة الإجمالية')}</span>
+      </div>
+      ${valStat}
+      <div class="sctx-chips">${chips}</div>
+    </div>
+  </div>`;
 }
 
 // Reverse DCF: what constant 10y FCF growth does the current market cap imply?
@@ -6042,6 +6125,8 @@ function loadTicker(ticker) {
     const decisionHtml = renderDecisionCard(ticker, m, scores);
     // Company profile / "About" card (renders already-synced FMP profile data)
     const profileHtml = renderCompanyProfile(ticker);
+    // Sector-relative context: quality rank + valuation percentile + scores vs sector avg
+    const sectorCtxHtml = renderSectorContext(ticker, scores);
 
     (_dashTarget || document.getElementById('dashFullView') || document.getElementById('mainArea')).innerHTML = `
     <div class="db">
@@ -6091,6 +6176,7 @@ function loadTicker(ticker) {
       </div>
 
       <div class="score-row">${scHtml}</div>
+      ${sectorCtxHtml}
       <div class="kpi-grid">${kpiHtml}</div>
 
       <div class="ai-block" id="agentPanel">
@@ -8205,6 +8291,7 @@ async function runBulkCloudRefresh(list) {
   // Reflect refreshed data immediately. mergeTickerLocally already updated the live
   // globals in place; do NOT call refreshGlobals() here — it rebuilds from the stale
   // DB_RAW and would discard everything we just merged.
+  invalidateComputedCaches(); // sector/score stats may have changed
   if (typeof buildSidebar === 'function') buildSidebar();
 
   ui.finish(synced, failed, errors,

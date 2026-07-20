@@ -1075,3 +1075,26 @@ body.light .chat-welcome-icon{background:rgba(59,130,246,.06);border-color:rgba(
 .cp-fact-k{font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
 .cp-fact-v{font-size:12.5px;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
 .cp-src{font-size:10px;color:var(--text3);margin-top:10px}
+
+/* ── Sector-relative context strip ── */
+.sector-context{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;margin-bottom:16px}
+.sctx-head{font-size:12px;color:var(--text2);margin-bottom:12px}
+.sctx-head b{color:var(--text)}
+.sctx-sub{color:var(--text3)}
+.sctx-body{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+.sctx-stat{display:flex;flex-direction:column;gap:2px;flex-shrink:0}
+.sctx-stat-num{font-family:var(--display);font-size:26px;line-height:1;color:var(--text);white-space:nowrap}
+.sctx-pct{font-size:13px;color:var(--text3)}
+.sctx-stat-lbl{font-size:10px;color:var(--text3);line-height:1.35}
+.sctx-chips{display:flex;gap:6px;flex-wrap:wrap;flex:1;min-width:230px}
+.sctx-chip{display:flex;flex-direction:column;align-items:center;gap:1px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:5px 9px;min-width:54px}
+.sctx-k{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:var(--text3)}
+.sctx-v{font-size:14px;font-weight:700;color:var(--text)}
+.sctx-arrow{font-size:10px}
+.sctx-avg{font-size:9px;color:var(--text3)}
+.sctx-chip.up{border-color:rgba(16,185,129,.4)}
+.sctx-chip.up .sctx-arrow{color:var(--green)}
+.sctx-chip.down{border-color:rgba(239,68,68,.4)}
+.sctx-chip.down .sctx-arrow{color:var(--red)}
+.sctx-chip.flat .sctx-arrow{color:var(--text3)}
+@media(max-width:900px){.sctx-body{gap:12px}.sctx-chips{min-width:0}}
