@@ -1,0 +1,9 @@
+# Supabase CLI local state — machine-specific, must not be committed
+.branches
+.temp
+
+# Local environment / secrets
+.env
+.env.keys
+.env.local
+.env.*.local

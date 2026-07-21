@@ -1,0 +1,17 @@
+# ── Secrets / environment ─────────────────────────────────────────────
+# Never commit API keys or credentials. Use an example file for templates.
+.env
+.env.*
+!.env.example
+
+# ── OS / editor cruft ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Dependencies / build output (if tooling is added later) ───────────
+node_modules/
+dist/
+*.log
