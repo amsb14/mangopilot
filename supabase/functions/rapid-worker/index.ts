@@ -71,13 +71,24 @@ Deno.serve(async (req) => {
   const apiKey = useOpenAI ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
   const defaultModel = useOpenAI ? "gpt-5.4-nano" : "deepseek-v4-flash";
 
+  const modelName = model || defaultModel;
+  const tokenCap = Math.min(max_tokens || 2048, 4096);
+  // GPT-5 family and o-series ("reasoning") models on OpenAI's Chat Completions API
+  // require `max_completion_tokens` (not `max_tokens`) and only accept the default
+  // temperature. gpt-4o(-mini) also accepts `max_completion_tokens`, so this stays
+  // backward-compatible; DeepSeek keeps the classic `max_tokens`.
+  const mLower = String(modelName).toLowerCase();
+  const isRestricted = mLower.startsWith("gpt-5") || mLower.startsWith("o1") ||
+    mLower.startsWith("o3") || mLower.startsWith("o4");
+
   const upstreamBody: Record<string, unknown> = {
-    model: model || defaultModel,
+    model: modelName,
     messages,
-    max_tokens: Math.min(max_tokens || 2048, 4096),
-    temperature: temperature ?? 0.7,
     stream: stream ?? true,
   };
+  if (useOpenAI) upstreamBody.max_completion_tokens = tokenCap;
+  else upstreamBody.max_tokens = tokenCap;
+  if (!isRestricted) upstreamBody.temperature = temperature ?? 0.7;
   if (tools) upstreamBody.tools = tools;
   if (tool_choice) upstreamBody.tool_choice = tool_choice;
   if (response_format) upstreamBody.response_format = response_format;
