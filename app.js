@@ -3825,6 +3825,11 @@ DO NOT explain your reasoning. Output the answer directly, starting with ###.`;
 
 const MAX_AGENT_ITERATIONS = 4;
 
+// Tiered model routing: the specialists (tool-calling loops) and chat run on the cheap
+// toggled model (DEEPSEEK_MODEL); the final synthesis step runs on a stronger model since
+// it's low-frequency and drives the answer quality the user actually reads.
+const COMPOSER_MODEL = 'gpt-5-mini';
+
 // Filter tools by allowed names for a specialist
 function getSpecialistTools(allowedNames) {
   return AGENT_TOOLS.filter(t => allowedNames.includes(t.function.name));
@@ -4094,19 +4099,20 @@ async function runCouncil(userMessage) {
     if (answerEl) answerEl.innerHTML = `<div class="ca-content"><div class="ca-loading">${lang==='ar'?'يركّب الإجابة...':'Composing...'}</div></div>`;
     const contentEl = answerEl?.querySelector('.ca-content');
 
-    // 25s timeout — page can never hang
+    // Composer runs on COMPOSER_MODEL (stronger than the specialists). 45s timeout —
+    // a heavier model can be slower; the page can never hang.
     const composerCtrl = new AbortController();
-    const composerTimer = setTimeout(() => composerCtrl.abort(), 25000);
+    const composerTimer = setTimeout(() => composerCtrl.abort(), 45000);
 
     let finalText = '';
     const composerStart = Date.now();
-    console.log('[Composer] starting with model:', DEEPSEEK_MODEL);
+    console.log('[Composer] starting with model:', COMPOSER_MODEL);
     try {
       const composerRes = await fetch(getProxyUrl(), {
         method: 'POST',
         headers: getProxyHeaders(),
         body: JSON.stringify({
-          model: DEEPSEEK_MODEL,
+          model: COMPOSER_MODEL,
           messages: [
             { role: 'system', content: COMPOSER_PROMPT },
             { role: 'user', content: composerInput }
