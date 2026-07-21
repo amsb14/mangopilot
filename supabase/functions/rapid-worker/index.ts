@@ -69,7 +69,7 @@ Deno.serve(async (req) => {
     ? "https://api.openai.com/v1/chat/completions"
     : "https://api.deepseek.com/chat/completions";
   const apiKey = useOpenAI ? OPENAI_API_KEY : DEEPSEEK_API_KEY;
-  const defaultModel = useOpenAI ? "gpt-5.4-nano" : "deepseek-v4-flash";
+  const defaultModel = useOpenAI ? "gpt-4o-mini" : "deepseek-v4-flash";
 
   const modelName = model || defaultModel;
   const tokenCap = Math.min(max_tokens || 2048, 4096);
