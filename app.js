@@ -1079,7 +1079,7 @@ async function agentStart(ticker) {
 
     // ── STEP 1.5: Fetch and display news context ──
     let newsContext = '';
-    if (FMP_QUOTE_KEY) {
+    if (isAiReady()) {
       setAgentStatus(true, lang === 'ar' ? 'يبحث عن الأخبار...' : 'Scanning recent news...');
       let news = await fetchLiveNews(ticker).catch(() => []);
       if (news && news.length) {
@@ -2039,7 +2039,7 @@ function tool_getUniverseStats() {
 const _perfCache = new Map();
 
 async function tool_screenByPerformance({ period_days, direction, top_n, sector, min_change_pct }) {
-  if (!FMP_QUOTE_KEY) return { error: 'Price data API not configured' };
+  if (!isAiReady()) return { error: 'Sign in required for price data' };
   const days = Math.max(1, Math.min(period_days || 30, 365 * 5));
   const n = Math.min(top_n || 10, 20);
 
@@ -2074,9 +2074,7 @@ async function tool_screenByPerformance({ period_days, direction, top_n, sector,
             if (_perfCache.has(cacheT) && Date.now() - _perfCache.get(cacheT).t < 60 * 60 * 1000) {
               return _perfCache.get(cacheT).data;
             }
-            const res = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=${t}&from=${fromStr}&apikey=${FMP_QUOTE_KEY}`);
-            if (!res.ok) return null;
-            const data = await res.json();
+            const data = await fmpProxyGet('historical-price-eod/light', { symbol: t, from: fromStr });
             if (!Array.isArray(data) || data.length < 2) return null;
             const newest = data[0]?.close || data[0]?.price;
             const oldestIdx = Math.min(targetBars - 1, data.length - 1);
@@ -2338,11 +2336,9 @@ async function enrichRecommendationCandidate(candidate) {
 }
 
 async function fetchAdvisorNews(ticker) {
-  if (!FMP_QUOTE_KEY) return [];
+  if (!isAiReady()) return [];
   try {
-    const res = await fetch(`https://financialmodelingprep.com/stable/news/stock?symbols=${ticker}&limit=3&apikey=${FMP_QUOTE_KEY}`);
-    if (!res.ok) return [];
-    const data = await res.json();
+    const data = await fmpProxyGet('news/stock', { symbols: ticker, limit: 3 });
     if (!Array.isArray(data)) return [];
     return data.slice(0, 3).map(n => ({
       title: n.title,
@@ -2354,15 +2350,14 @@ async function fetchAdvisorNews(ticker) {
 }
 
 async function fetchAdvisorAnalyst(ticker) {
-  if (!FMP_QUOTE_KEY) return null;
+  if (!isAiReady()) return null;
   try {
-    const [ratingRes, targetRes] = await Promise.all([
-      fetch(`https://financialmodelingprep.com/stable/ratings-snapshot?symbol=${ticker}&apikey=${FMP_QUOTE_KEY}`),
-      fetch(`https://financialmodelingprep.com/stable/price-target-consensus?symbol=${ticker}&apikey=${FMP_QUOTE_KEY}`)
+    const [rd, td] = await Promise.all([
+      fmpProxyGet('ratings-snapshot', { symbol: ticker }),
+      fmpProxyGet('price-target-consensus', { symbol: ticker })
     ]);
     let rating = null, target = null;
-    if (ratingRes.ok) {
-      const rd = await ratingRes.json();
+    if (rd) {
       const r = Array.isArray(rd) ? rd[0] : rd;
       if (r) rating = {
         rating: r.rating || r.ratingRecommendation,
@@ -2370,8 +2365,7 @@ async function fetchAdvisorAnalyst(ticker) {
         details: r.ratingDetailsDCFRecommendation || null
       };
     }
-    if (targetRes.ok) {
-      const td = await targetRes.json();
+    if (td) {
       const t2 = Array.isArray(td) ? td[0] : td;
       if (t2) target = {
         avg: t2.targetConsensus ?? t2.targetMedian ?? t2.targetMean,
@@ -2410,7 +2404,7 @@ async function fetchAdvisorKG(ticker) {
 // One batch FMP call for upcoming earnings; cached for 1 hour
 let _earningsMapCache = { data: null, fetchedAt: 0 };
 async function fetchUpcomingEarningsMap() {
-  if (!FMP_QUOTE_KEY) return {};
+  if (!isAiReady()) return {};
   const HOUR = 60 * 60 * 1000;
   if (_earningsMapCache.data && Date.now() - _earningsMapCache.fetchedAt < HOUR) return _earningsMapCache.data;
   try {
@@ -2418,9 +2412,7 @@ async function fetchUpcomingEarningsMap() {
     const inSixtyDays = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
     const from = now.toISOString().slice(0, 10);
     const to = inSixtyDays.toISOString().slice(0, 10);
-    const res = await fetch(`https://financialmodelingprep.com/stable/earnings-calendar?from=${from}&to=${to}&apikey=${FMP_QUOTE_KEY}`);
-    if (!res.ok) return {};
-    const data = await res.json();
+    const data = await fmpProxyGet('earnings-calendar', { from, to });
     if (!Array.isArray(data)) return {};
     const map = {};
     for (const e of data) {
@@ -2503,7 +2495,7 @@ function tool_getPortfolio() {
 const PORTFOLIO_QUOTE_TTL_MS = 30 * 1000;
 let _portfolioQuotesRefreshing = false;
 async function refreshPortfolioQuotes() {
-  if (_portfolioQuotesRefreshing || !portfolio.length || !FMP_QUOTE_KEY) return;
+  if (_portfolioQuotesRefreshing || !portfolio.length || !isAiReady()) return;
   // Only refresh tickers whose price is stale (>30s old)
   const now = Date.now();
   const stale = portfolio
@@ -2686,7 +2678,7 @@ function portSelectTicker(ticker) {
   renderPill();
   // If the price is stale (>30s) or missing, fetch a fresh live quote and re-render the pill
   const stale = !stk._priceUpdatedAt || (Date.now() - stk._priceUpdatedAt) > PORTFOLIO_QUOTE_TTL_MS;
-  if (stale && FMP_QUOTE_KEY) {
+  if (stale && isAiReady()) {
     fetchLiveQuote(ticker).then(q => {
       if (!q) return;
       updateStockBarWithLive(ticker, q);
@@ -3276,7 +3268,7 @@ async function computeAllJournalPerf(entries) {
     const stk = STOCK[t];
     return !stk?._priceUpdatedAt || Date.now() - stk._priceUpdatedAt > 60000;
   });
-  if (stale.length && FMP_QUOTE_KEY) {
+  if (stale.length && isAiReady()) {
     const BATCH = 5;
     for (let i = 0; i < stale.length; i += BATCH) {
       const slice = stale.slice(i, i + BATCH);
@@ -4247,7 +4239,7 @@ async function chatAnalyzeTicker(ticker) {
     chatHistory.push({ role: 'agent', content: analysisText, ticker, timestamp: Date.now() });
 
     // News sentiment
-    if (FMP_QUOTE_KEY && !signal.aborted) {
+    if (isAiReady() && !signal.aborted) {
       let news = await fetchLiveNews(ticker).catch(() => []);
       if (news?.length && isAiReady()) {
         news = await analyseNewsSentiment(news, ticker);
@@ -4766,9 +4758,7 @@ async function chatPerformanceScreen(text) {
       const batch = tickers.slice(i, i + batchSize);
       const promises = batch.map(async t => {
         try {
-          const res = await fetch(`https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=${t}&from=${fromStr}&apikey=${FMP_QUOTE_KEY}`);
-          if (!res.ok) return { ticker: t, perf: null, price: STOCK[t]?.price || 0 };
-          const data = await res.json();
+          const data = await fmpProxyGet('historical-price-eod/light', { symbol: t, from: fromStr });
           if (!Array.isArray(data) || data.length < 2) return { ticker: t, perf: null, price: STOCK[t]?.price || 0 };
           // Data is sorted newest-first. Take the bar that's exactly `targetBars - 1` positions back.
           const newest = data[0]?.close || data[0]?.price;
@@ -4847,7 +4837,7 @@ const HM_QUOTE_TTL_MS = 60 * 1000; // skip tickers refreshed within the last 60s
 
 async function refreshHeatmapPrices() {
   if (_hmPricesRefreshing) { _hmPricesCancel = true; return; }
-  if (!FMP_QUOTE_KEY) { console.error('[Heatmap] FMP key not configured'); return; }
+  if (!isAiReady()) { console.error('[Heatmap] Sign in required for live prices'); return; }
 
   const visibleAll = TICKERS.filter(t => STOCK[t]?.marketCap && (!_heatmapSector || STOCK[t]?.sector === _heatmapSector))
     .sort((a, b) => (STOCK[b]?.marketCap || 0) - (STOCK[a]?.marketCap || 0));
@@ -6299,7 +6289,7 @@ function loadTicker(ticker) {
     setTimeout(() => {
       drawCharts(ticker, rows, m);
       // Fetch live data in background (non-blocking)
-      if (FMP_QUOTE_KEY) {
+      if (isAiReady()) {
         fetchLiveQuote(ticker).then(q => updateStockBarWithLive(ticker, q));
         fetchLiveNews(ticker).then(async news => {
           if (!news?.length) { renderNewsSection(news); return; }
@@ -7352,15 +7342,32 @@ async function clearCache() {
   location.reload();
 }
 
-// ── LIVE STOCK PRICE (FMP Quote API) ──────────────────────────────────────────
-const FMP_QUOTE_KEY = 'MLmSuWJ90zCcDwIwSoktJHsfJaz5Oey0'; // ← Paste your FMP API key here once. It stays in source code.
+// ── LIVE STOCK PRICE (via fmp-proxy edge function — FMP key stays server-side) ─
+function getFmpProxyUrl() { return SUPABASE_URL + '/functions/v1/fmp-proxy'; }
+
+// Fetches a whitelisted FMP endpoint through the Supabase proxy. Requires sign-in
+// (same x-auth-hash gate as the AI proxy) — returns null on any failure, never throws.
+async function fmpProxyGet(endpoint, params = {}) {
+  if (!isAiReady()) return null;
+  try {
+    const res = await fetch(getFmpProxyUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}`, 'x-auth-hash': USER_AUTH_HASH },
+      body: JSON.stringify({ endpoint, params })
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn('fmpProxyGet failed for', endpoint, e);
+    return null;
+  }
+}
 
 async function fetchLiveQuote(ticker) {
-  if (!FMP_QUOTE_KEY) return null;
+  if (!isAiReady()) return null;
   try {
-    const res = await fetch(`https://financialmodelingprep.com/stable/quote?symbol=${ticker}&apikey=${FMP_QUOTE_KEY}`);
-    if (!res.ok) return null;
-    const data = await res.json();
+    const data = await fmpProxyGet('quote', { symbol: ticker });
+    if (!data) return null;
     const q = Array.isArray(data) ? data[0] : data;
     if (!q || !q.price) return null;
     return {
@@ -7433,7 +7440,7 @@ function updateStockBarWithLive(ticker, quote) {
 
 // ── MARKET MOVERS (gainers, losers, active) ──────────────────────────────────
 async function fetchMarketMovers() {
-  if (!FMP_QUOTE_KEY) return;
+  if (!isAiReady()) return;
   const el = document.getElementById('marketMovers');
   if (!el) return;
 
@@ -7442,9 +7449,9 @@ async function fetchMarketMovers() {
 
   try {
     const [gainers, losers, active] = await Promise.all([
-      fetch(`https://financialmodelingprep.com/stable/biggest-gainers?apikey=${FMP_QUOTE_KEY}`).then(r => r.json()).catch(() => []),
-      fetch(`https://financialmodelingprep.com/stable/biggest-losers?apikey=${FMP_QUOTE_KEY}`).then(r => r.json()).catch(() => []),
-      fetch(`https://financialmodelingprep.com/stable/most-active?apikey=${FMP_QUOTE_KEY}`).then(r => r.json()).catch(() => []),
+      fmpProxyGet('biggest-gainers', {}),
+      fmpProxyGet('biggest-losers', {}),
+      fmpProxyGet('most-active', {}),
     ]);
 
     const renderList = (items, colorFn) => (items || []).slice(0, 8).map(s => {
@@ -7478,16 +7485,13 @@ async function fetchMarketMovers() {
 
 // ── STOCK PRICE HISTORY CHART ────────────────────────────────────────────────
 async function fetchPriceHistory(ticker, range) {
-  if (!FMP_QUOTE_KEY) return [];
+  if (!isAiReady()) return [];
   try {
-    let url, data;
+    let data;
     const today = new Date();
 
     if (range === '1d') {
-      url = `https://financialmodelingprep.com/stable/historical-chart/5min?symbol=${ticker}&apikey=${FMP_QUOTE_KEY}`;
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      data = await res.json();
+      data = await fmpProxyGet('historical-chart/5min', { symbol: ticker });
       if (!data?.length) return [];
       // Find the most recent trading day in the data (may not be today if market is closed)
       const latestDate = data[0]?.date?.slice(0, 10);
@@ -7496,10 +7500,7 @@ async function fetchPriceHistory(ticker, range) {
 
     } else if (range === '5d') {
       // Use 1-hour intervals, filter to last 5 trading days
-      url = `https://financialmodelingprep.com/stable/historical-chart/1hour?symbol=${ticker}&apikey=${FMP_QUOTE_KEY}`;
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      data = await res.json();
+      data = await fmpProxyGet('historical-chart/1hour', { symbol: ticker });
       // Get unique dates and take only the last 5
       const dates = [...new Set((data || []).map(d => d.date?.slice(0, 10)))].sort().slice(-5);
       data = (data || []).filter(d => dates.includes(d.date?.slice(0, 10)));
@@ -7513,10 +7514,7 @@ async function fetchPriceHistory(ticker, range) {
       else if (range === '1y') fromDate.setFullYear(fromDate.getFullYear() - 1);
       else if (range === '5y') fromDate.setFullYear(fromDate.getFullYear() - 5);
       const from = fromDate.toISOString().slice(0, 10);
-      url = `https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=${ticker}&from=${from}&apikey=${FMP_QUOTE_KEY}`;
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      data = await res.json();
+      data = await fmpProxyGet('historical-price-eod/light', { symbol: ticker, from });
       return Array.isArray(data) ? data.reverse() : [];
     }
   } catch (e) {
@@ -7665,11 +7663,9 @@ async function loadPriceChart(ticker, range) {
 
 // ── LIVE NEWS (FMP News API) ──────────────────────────────────────────────────
 async function fetchLiveNews(ticker) {
-  if (!FMP_QUOTE_KEY) return [];
+  if (!isAiReady()) return [];
   try {
-    const res = await fetch(`https://financialmodelingprep.com/stable/news/stock?symbols=${ticker}&limit=5&apikey=${FMP_QUOTE_KEY}`);
-    if (!res.ok) return [];
-    return await res.json();
+    return (await fmpProxyGet('news/stock', { symbols: ticker, limit: 5 })) || [];
   } catch (e) {
     console.warn('News fetch failed for', ticker, e);
     return [];
