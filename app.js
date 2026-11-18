@@ -2647,6 +2647,10 @@ function renderPortfolioPanelInner() {
     ${data.totalDayPL != null ? `<div class="port-row"><span class="port-lbl">${isAr ? 'اليوم' : 'Day'}</span><span class="port-val ${dayClass}">${data.totalDayPL > 0 ? '+' : ''}${fM(Math.abs(data.totalDayPL))} (${data.totalDayPct > 0 ? '+' : ''}${data.totalDayPct.toFixed(2)}%)</span></div>` : ''}
     ${data.totalUnrealized != null ? `<div class="port-row"><span class="port-lbl">${isAr ? 'إجمالي' : 'Total'}</span><span class="port-val ${totalClass}">${data.totalUnrealized > 0 ? '+' : ''}${fM(Math.abs(data.totalUnrealized))} (${data.totalUnrealizedPct > 0 ? '+' : ''}${data.totalUnrealizedPct.toFixed(1)}%)</span></div>` : ''}
     <div class="port-row"><span class="port-lbl">${data.count} ${isAr ? 'مراكز' : 'positions'}</span>${data.weightedScore != null ? `<span class="port-score" style="color:${sCol(data.weightedScore)}">★ ${data.weightedScore.toFixed(1)}</span>` : ''}</div>
+    ${(() => {
+      const n = (portfolio || []).filter(p => _journalCache.some(r => r.ticker === p.ticker && !r.closed && entryHasTrigger(r))).length;
+      return n ? `<div class="j-flag bad" onclick="event.stopPropagation(); showJournal()">⚠ ${n} ${isAr ? 'شروط خروج متحققة' : 'exit condition' + (n === 1 ? '' : 's') + ' triggered'}</div>` : '';
+    })()}
   </div>
   <button class="port-add-btn-mini" onclick="openPortfolioModal()" title="${isAr ? 'إضافة' : 'Add positions'}">+ ${isAr ? 'إضافة' : 'Add'}</button>`;
 }
@@ -3268,16 +3272,299 @@ function askCouncilAboutPortfolio() {
 // Answers: "do my picks actually outperform doing nothing?"
 
 const SPY_TICKER = 'SPY';
+let _journalCache = [];
+let _thesisTicker = null;
+let _thesisRationale = '';
+let _thesisConditions = [];
+const _histOff = new Set();
+const _pxCache = new Map();
+let _marksUnsupported = false;
+
+const JOURNAL_HORIZONS = [
+  { id: '3m', months: 3, en: '3 months', ar: '3 أشهر' },
+  { id: '6m', months: 6, en: '6 months', ar: '6 أشهر' },
+  { id: '12m', months: 12, en: '12 months', ar: '12 شهراً' },
+];
+
+function addMonths(date, n) {
+  const d = new Date(date.getTime());
+  const day = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + n);
+  if (d.getUTCDate() < day) d.setUTCDate(0);
+  return d;
+}
+
+function pctChange(from, to) {
+  const a = Number(from), b = Number(to);
+  if (!isFinite(a) || !isFinite(b) || a === 0) return null;
+  return (b - a) / Math.abs(a) * 100;
+}
+
+function fmtPctOrNa(n, dp = 1) {
+  if (n == null || !isFinite(n)) return 'n/a';
+  return (n > 0 ? '+' : '') + n.toFixed(dp) + '%';
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(null), ms)),
+  ]);
+}
+
+function confBucket(entry) {
+  const isAr = lang === 'ar';
+  const c = entry.confidence == null ? null : Number(entry.confidence);
+  if (c == null || !isFinite(c)) return isAr ? 'بدون ثقة' : 'No confidence';
+  if (c < 60) return isAr ? 'أقل من 60' : 'Under 60';
+  if (c < 80) return '60–79';
+  return isAr ? '80 فأكثر' : '80 and up';
+}
+
+function metricNow(ticker, metric) {
+  const rows = ANNUAL[ticker];
+  const m = rows?.length ? calcMetrics(rows) : null;
+  const stk = STOCK[ticker] || {};
+  if (metric === 'revenue_growth') return m ? latestMetric(m.yoy, 'revenue_growth') : null;
+  if (metric === 'net_margin') return m ? latestMetric(m.prof, 'net_margin') : null;
+  if (metric === 'price') return stk.price != null && isFinite(Number(stk.price)) ? Number(stk.price) : null;
+  if (metric === 'pe') return stk.pe > 0 ? Number(stk.pe) : null;
+  return null;
+}
+
+function formatMetric(metric, n) {
+  if (n == null || !isFinite(Number(n))) return 'n/a';
+  const v = Number(n);
+  if (metric === 'price') return '$' + v.toFixed(2);
+  if (metric === 'pe') return v.toFixed(1) + 'x';
+  return (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+}
+
+function evalConditions(entry) {
+  const isAr = lang === 'ar';
+  const list = Array.isArray(entry.conditions) ? entry.conditions : [];
+  const names = {
+    revenue_growth: isAr ? 'نمو الإيرادات' : 'Revenue growth',
+    net_margin: isAr ? 'الهامش الصافي' : 'Net margin',
+    price: isAr ? 'السعر' : 'Price',
+    pe: isAr ? 'مضاعف الربح' : 'P/E',
+    note: isAr ? 'ملاحظة' : 'Note',
+  };
+  return list.map(c => {
+    if (!c || c.metric === 'note') {
+      return { ...c, manual: true, triggered: false, unknown: false, label: c?.text || (isAr ? 'ملاحظة للمراجعة' : 'Review note'), detail: '' };
+    }
+    const actual = metricNow(entry.ticker, c.metric);
+    const target = Number(c.value);
+    const known = actual != null && isFinite(target);
+    const triggered = known && (c.op === 'above' ? actual > target : actual < target);
+    const op = c.op === 'above' ? (isAr ? 'أعلى من' : 'above') : (isAr ? 'أقل من' : 'below');
+    return {
+      ...c,
+      triggered,
+      unknown: !known,
+      actual,
+      label: `${names[c.metric] || c.metric} ${op} ${formatMetric(c.metric, target)}`,
+      detail: `${isAr ? 'الآن' : 'Now'} ${formatMetric(c.metric, actual)}`,
+    };
+  });
+}
+
+function entryHasTrigger(entry) {
+  return evalConditions(entry).some(c => c.triggered);
+}
+
+async function fetchCloseOnOrAfter(symbol, isoDate) {
+  if (!isAiReady() || !symbol || !isoDate) return null;
+  const from = String(isoDate).slice(0, 10);
+  const toDate = new Date(from + 'T00:00:00Z');
+  toDate.setUTCDate(toDate.getUTCDate() + 12);
+  const to = toDate.toISOString().slice(0, 10);
+  const data = await fmpProxyGet('historical-price-eod/light', { symbol, from, to });
+  if (!Array.isArray(data) || !data.length) return null;
+  const rows = data.map(d => ({
+    date: String(d.date || '').slice(0, 10),
+    price: Number(d.price ?? d.close),
+  })).filter(r => r.date && isFinite(r.price));
+  if (!rows.length) return null;
+  rows.sort((a, b) => a.date.localeCompare(b.date));
+  return rows.find(r => r.date >= from) || rows[rows.length - 1];
+}
+
+async function historicalClose(symbol, day) {
+  if (_histOff.has(symbol)) return null;
+  const key = symbol + '@' + day;
+  if (_pxCache.has(key)) return _pxCache.get(key);
+  const got = await withTimeout(fetchCloseOnOrAfter(symbol, day), 8000);
+  if (!got) _histOff.add(symbol);
+  _pxCache.set(key, got);
+  return got;
+}
+
+function checkpointFromMark(h, entry, mark) {
+  const base = { id: h.id, labelEn: h.en, labelAr: h.ar };
+  if (!mark || mark.price == null || !isFinite(Number(mark.price))) {
+    return { ...base, state: 'na', tickerReturn: null, spyReturn: null, excess: null, hit: null };
+  }
+  const tickerReturn = pctChange(entry.entry_price, mark.price);
+  let spyReturn = null;
+  if (entry.spy_entry_price != null && mark.spy != null && isFinite(Number(mark.spy))) {
+    spyReturn = pctChange(entry.spy_entry_price, mark.spy);
+  }
+  const excess = (tickerReturn != null && spyReturn != null)
+    ? (entry.direction === 'short' ? (spyReturn - tickerReturn) : (tickerReturn - spyReturn))
+    : null;
+  return {
+    ...base,
+    state: 'ready',
+    tickerReturn,
+    spyReturn,
+    excess,
+    hit: excess == null ? null : excess > 0,
+  };
+}
+
+async function savePriceMarks(id, marks) {
+  if (_marksUnsupported || !getSupabase()) return;
+  const { error } = await supabaseClient
+    .from('decision_journal')
+    .update({ price_marks: marks })
+    .eq('id', id)
+    .eq('pin_hash', USER_AUTH_HASH);
+  if (error) {
+    if (/price_marks|column|schema/i.test(error.message || '')) _marksUnsupported = true;
+    console.warn('price mark save', error.message);
+  }
+}
+
+async function checkpointsFor(entry) {
+  const saved = new Date(entry.saved_at);
+  const marks = (entry.price_marks && typeof entry.price_marks === 'object' && !Array.isArray(entry.price_marks))
+    ? { ...entry.price_marks } : {};
+  const fresh = {};
+  const list = [];
+  for (const h of JOURNAL_HORIZONS) {
+    const due = addMonths(saved, h.months);
+    if (due.getTime() > Date.now()) {
+      list.push({ id: h.id, labelEn: h.en, labelAr: h.ar, state: 'pending', tickerReturn: null, spyReturn: null, excess: null, hit: null });
+      continue;
+    }
+    const day = due.toISOString().slice(0, 10);
+    let mark = marks[h.id];
+    if (!mark || mark.price == null) {
+      const px = await historicalClose(entry.ticker, day);
+      const spy = entry.spy_entry_price != null ? await historicalClose(SPY_TICKER, day) : null;
+      if (px) {
+        mark = { price: px.price, spy: spy?.price ?? null, asof: px.date };
+        marks[h.id] = mark;
+        fresh[h.id] = mark;
+      }
+    }
+    list.push(checkpointFromMark(h, entry, mark));
+  }
+
+  let nowPrice = null;
+  let nowSpy = null;
+  let nowLabel = { id: 'now', en: 'Current', ar: 'الآن' };
+  if (entry.closed && entry.exit_price != null && isFinite(Number(entry.exit_price))) {
+    nowPrice = Number(entry.exit_price);
+    nowLabel = { id: 'now', en: 'At exit', ar: 'عند الخروج' };
+    nowSpy = marks.exit?.spy ?? null;
+    if (nowSpy == null && entry.spy_entry_price != null && entry.exit_at) {
+      const spy = await historicalClose(SPY_TICKER, String(entry.exit_at).slice(0, 10));
+      if (spy) {
+        nowSpy = spy.price;
+        marks.exit = { spy: spy.price, asof: spy.date };
+        fresh.exit = marks.exit;
+      }
+    }
+  } else {
+    const live = STOCK[entry.ticker]?.price;
+    nowPrice = live != null && isFinite(Number(live)) ? Number(live) : null;
+    const spyLive = STOCK[SPY_TICKER]?.price;
+    nowSpy = spyLive != null && isFinite(Number(spyLive)) ? Number(spyLive) : null;
+  }
+  list.push(checkpointFromMark(nowLabel, entry, { price: nowPrice, spy: nowSpy }));
+
+  if (Object.keys(fresh).length) savePriceMarks(entry.id, marks).catch(() => {});
+  return list;
+}
+
+function pickVerdict(checkpoints) {
+  for (const id of ['now', '12m', '6m', '3m']) {
+    const c = checkpoints.find(x => x.id === id && x.excess != null);
+    if (c) return c;
+  }
+  return null;
+}
+
+async function refreshQuotesFor(entries) {
+  const tickers = [...new Set([SPY_TICKER, ...entries.map(e => e.ticker)])];
+  const stale = tickers.filter(t => {
+    const stk = STOCK[t];
+    return !stk?._priceUpdatedAt || Date.now() - stk._priceUpdatedAt > 60000;
+  });
+  if (!stale.length || !isAiReady()) return;
+  const BATCH = 4;
+  for (let i = 0; i < stale.length; i += BATCH) {
+    const slice = stale.slice(i, i + BATCH);
+    const quotes = await Promise.all(slice.map(t => withTimeout(fetchLiveQuote(t).catch(() => null), 8000)));
+    slice.forEach((t, idx) => { if (quotes[idx]) updateStockBarWithLive(t, quotes[idx]); });
+  }
+}
+
+async function enrichJournalEntries(entries) {
+  await refreshQuotesFor(entries);
+  const out = [];
+  for (const entry of entries) {
+    const checkpoints = await checkpointsFor(entry);
+    out.push({
+      ...entry,
+      checkpoints,
+      verdict: pickVerdict(checkpoints),
+      evaluated: evalConditions(entry),
+    });
+  }
+  return out;
+}
+
+function groupJournal(rows, keyFn) {
+  const map = new Map();
+  for (const r of rows) {
+    const k = keyFn(r);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(r);
+  }
+  return [...map.entries()].map(([label, list]) => {
+    const scored = list.filter(r => r.verdict);
+    return {
+      label,
+      n: list.length,
+      scored: scored.length,
+      hitRate: scored.length ? scored.filter(r => r.verdict.hit).length / scored.length * 100 : null,
+      avgExcess: scored.length ? scored.reduce((s, r) => s + r.verdict.excess, 0) / scored.length : null,
+    };
+  }).sort((a, b) => b.n - a.n);
+}
+
+function autoRationale(ticker) {
+  let rationale = '';
+  if (_lastVerdict?.ticker === ticker) rationale = _lastVerdict.summary;
+  const recentChat = (chatHistory || []).filter(m => m.role === 'agent' && m.ticker === ticker).pop();
+  if (recentChat?.content) {
+    const aiTxt = recentChat.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    rationale = rationale ? `${rationale}\n\nAI take: ${aiTxt}` : aiTxt;
+  }
+  return rationale;
+}
 
 // Save a pick to the journal. Auto-fills entry_price + SPY benchmark snapshot.
-async function saveToJournal({ ticker, direction = 'long', rationale = '', source = 'manual', source_query = '', confidence = null }) {
+async function saveToJournal({ ticker, direction = 'long', rationale = '', source = 'manual', source_query = '', confidence = null, thesis = '', conditions = [] }) {
   if (!isAiReady()) { addChatMessage?.('agent', '🔒 Sign in to save picks to your journal.'); return null; }
   if (!ticker) { console.error('saveToJournal: ticker required'); return null; }
   if (!getSupabase()) { console.error('Supabase not initialized'); return null; }
 
   const t = ticker.toUpperCase();
-
-  // Fetch current price (live, not cached) + SPY for benchmark
   let entryPrice = null, spyPrice = null;
   try {
     const [q, spy] = await Promise.all([
@@ -3285,21 +3572,36 @@ async function saveToJournal({ ticker, direction = 'long', rationale = '', sourc
       fetchLiveQuote(SPY_TICKER)
     ]);
     entryPrice = q?.price ?? STOCK[t]?.price ?? null;
-    spyPrice = spy?.price ?? null;
+    spyPrice = spy?.price ?? STOCK[SPY_TICKER]?.price ?? null;
   } catch (e) {
     console.warn('Live quote fetch failed, falling back to cached:', e);
     entryPrice = STOCK[t]?.price ?? null;
+    spyPrice = STOCK[SPY_TICKER]?.price ?? null;
   }
   if (!entryPrice) { console.error('Could not determine entry price for', t); return null; }
+
+  const cleanConditions = (conditions || []).filter(c => {
+    if (!c) return false;
+    if (c.metric === 'note') return !!(c.text || '').trim();
+    return c.value !== '' && c.value != null && isFinite(Number(c.value));
+  }).slice(0, 8).map(c => ({
+    id: c.id || ('c' + Math.random().toString(36).slice(2, 8)),
+    metric: c.metric,
+    op: c.op === 'above' ? 'above' : 'below',
+    value: c.metric === 'note' ? null : Number(c.value),
+    text: (c.text || '').slice(0, 280),
+  }));
 
   const row = {
     pin_hash: USER_AUTH_HASH,
     ticker: t,
     entry_price: entryPrice,
     spy_entry_price: spyPrice,
-    direction,
-    confidence,
+    direction: direction === 'short' ? 'short' : 'long',
+    confidence: confidence != null && isFinite(Number(confidence)) ? Number(confidence) : null,
     rationale: (rationale || '').slice(0, 2000),
+    thesis: (thesis || '').trim().slice(0, 2000) || null,
+    conditions: cleanConditions,
     source,
     source_query: (source_query || '').slice(0, 500),
     closed: false
@@ -3308,14 +3610,12 @@ async function saveToJournal({ ticker, direction = 'long', rationale = '', sourc
   const { data, error } = await supabaseClient.from('decision_journal').insert(row).select().single();
   if (error) {
     console.error('Journal save failed:', error);
-    return null;
+    return { error: error.message || 'save failed' };
   }
-  console.log(`%c[Journal] ✓ Saved ${t} at $${entryPrice.toFixed(2)} (SPY $${spyPrice?.toFixed(2) ?? '—'})`, 'color:#10b981;font-weight:bold');
   updateJournalBadge();
   return data;
 }
 
-// Console helper: load all of user's journal entries
 async function loadJournal() {
   if (!isAiReady() || !getSupabase()) return [];
   const { data, error } = await supabaseClient
@@ -3327,65 +3627,25 @@ async function loadJournal() {
   return data || [];
 }
 
-// Compute live performance for a single entry: ticker return, SPY return, alpha, days held
-async function computeJournalRow(entry) {
-  const t = entry.ticker;
-  const currentPrice = STOCK[t]?.price ?? null; // already refreshed by computeAllJournalPerf
-  const currentSpy = STOCK[SPY_TICKER]?.price ?? null;
-
-  const tickerReturn = (currentPrice && entry.entry_price) ? ((currentPrice - entry.entry_price) / entry.entry_price * 100) : null;
-  const spyReturn = (currentSpy && entry.spy_entry_price) ? ((currentSpy - entry.spy_entry_price) / entry.spy_entry_price * 100) : null;
-  const alpha = (tickerReturn != null && spyReturn != null) ? (tickerReturn - spyReturn) : null;
-  const daysHeld = Math.max(1, Math.floor((Date.now() - new Date(entry.saved_at).getTime()) / 86400000));
-
-  return {
-    ...entry,
-    current_price: currentPrice,
-    current_spy: currentSpy,
-    ticker_return_pct: tickerReturn,
-    spy_return_pct: spyReturn,
-    alpha_pct: alpha,
-    days_held: daysHeld,
-    is_winner: alpha != null ? alpha > 0 : null
-  };
-}
-
-// Fetch live SPY + all journal-ticker prices in parallel, then compute perf for each entry
-async function computeAllJournalPerf(entries) {
-  if (!entries?.length) return [];
-  // Collect unique tickers (including SPY)
-  const tickers = [...new Set([SPY_TICKER, ...entries.map(e => e.ticker)])];
-  // Force a fresh-quote pass: only refresh ones not refreshed in last 60s
-  const stale = tickers.filter(t => {
-    const stk = STOCK[t];
-    return !stk?._priceUpdatedAt || Date.now() - stk._priceUpdatedAt > 60000;
-  });
-  if (stale.length && isAiReady()) {
-    const BATCH = 5;
-    for (let i = 0; i < stale.length; i += BATCH) {
-      const slice = stale.slice(i, i + BATCH);
-      const quotes = await Promise.all(slice.map(t => fetchLiveQuote(t).catch(() => null)));
-      slice.forEach((t, idx) => { if (quotes[idx]) updateStockBarWithLive(t, quotes[idx]); });
-      if (i + BATCH < stale.length) await new Promise(r => setTimeout(r, 120));
-    }
-  }
-  return Promise.all(entries.map(e => computeJournalRow(e)));
-}
-
-// Mark an entry as closed at current price
-async function closeJournalEntry(id) {
+async function closeJournalEntry(id, exitPrice, exitAt) {
   if (!isAiReady() || !getSupabase()) return false;
-  const entries = await loadJournal();
-  const entry = entries.find(e => e.id === id);
-  if (!entry) return false;
-  const q = await fetchLiveQuote(entry.ticker);
-  const exitPrice = q?.price ?? STOCK[entry.ticker]?.price ?? null;
+  let price = exitPrice != null && isFinite(Number(exitPrice)) ? Number(exitPrice) : null;
+  let when = exitAt ? new Date(exitAt) : new Date();
+  if (!price) {
+    const entries = _journalCache.length ? _journalCache : await loadJournal();
+    const entry = entries.find(e => String(e.id) === String(id));
+    const q = entry ? await fetchLiveQuote(entry.ticker).catch(() => null) : null;
+    price = q?.price ?? (entry ? STOCK[entry.ticker]?.price : null);
+  }
+  if (!price) return false;
+  if (!(when instanceof Date) || isNaN(when.getTime())) when = new Date();
   const { error } = await supabaseClient
     .from('decision_journal')
-    .update({ closed: true, exit_price: exitPrice, exit_at: new Date().toISOString() })
+    .update({ closed: true, exit_price: price, exit_at: when.toISOString() })
     .eq('id', id)
     .eq('pin_hash', USER_AUTH_HASH);
   if (error) { console.error(error); return false; }
+  updateJournalBadge();
   return true;
 }
 
@@ -3401,82 +3661,224 @@ async function deleteJournalEntry(id) {
   return true;
 }
 
-// Refresh the count badge in the sidebar "My Picks" label
 async function updateJournalBadge() {
   const badge = document.getElementById('journalCountBadge');
-  if (!badge || !isAiReady() || !getSupabase()) return;
+  const alert = document.getElementById('journalAlertBadge');
+  if (!isAiReady() || !getSupabase()) {
+    _journalCache = [];
+    badge?.classList.add('hidden');
+    alert?.classList.add('hidden');
+    renderCompanyThesisFlag(activeTicker);
+    if (document.getElementById('portfolioPanel')) renderPortfolioPanelInner();
+    return;
+  }
   try {
-    const { count } = await supabaseClient
-      .from('decision_journal')
-      .select('*', { count: 'exact', head: true })
-      .eq('pin_hash', USER_AUTH_HASH);
-    if (count != null && count > 0) {
-      badge.textContent = count;
-      badge.classList.remove('hidden');
-    } else {
-      badge.classList.add('hidden');
+    const rows = await loadJournal();
+    _journalCache = rows;
+    const open = rows.filter(r => !r.closed).length;
+    if (badge) {
+      if (rows.length > 0) {
+        badge.textContent = rows.length;
+        badge.classList.remove('hidden');
+      } else badge.classList.add('hidden');
     }
+    const triggered = rows.filter(r => !r.closed && entryHasTrigger(r)).length;
+    if (alert) {
+      if (triggered > 0) {
+        alert.textContent = triggered;
+        alert.classList.remove('hidden');
+        alert.title = lang === 'ar' ? 'شروط خروج تحققت' : 'Exit conditions triggered';
+      } else alert.classList.add('hidden');
+    }
+    void open;
+    renderCompanyThesisFlag(activeTicker);
+    if (document.getElementById('portfolioPanel')) renderPortfolioPanelInner();
   } catch { /* swallow */ }
 }
 
-// Wired to the "📓 Save" button on every ticker dashboard.
-// Captures the currently-viewed ticker + most recent chat agent message as rationale.
-async function quickSaveCurrentTicker() {
-  if (!activeTicker) {
-    console.warn('No active ticker to save');
+function renderCompanyThesisFlag(ticker) {
+  const el = document.getElementById('thesisFlag');
+  if (!el) return;
+  const isAr = lang === 'ar';
+  if (!ticker || !isAiReady()) { el.innerHTML = ''; return; }
+  const open = _journalCache.filter(r => r.ticker === ticker && !r.closed);
+  if (!open.length) { el.innerHTML = ''; return; }
+  const triggered = open.flatMap(r => evalConditions(r).filter(c => c.triggered));
+  if (!triggered.length) {
+    el.innerHTML = `<div class="j-flag ok">📓 ${isAr ? 'لا يوجد شرط خروج متحقق' : 'No exit condition triggered'} · ${open.length} ${isAr ? 'صفقة مفتوحة' : 'open'}</div>`;
     return;
   }
-  const t = activeTicker;
-  // Rationale = rule-based snapshot verdict (if computed for this ticker) + last AI take
-  let rationale = '';
-  if (_lastVerdict?.ticker === t) rationale = _lastVerdict.summary;
-  const recentChat = (chatHistory || []).filter(m => m.role === 'agent' && m.ticker === t).pop();
-  if (recentChat?.content) {
-    const aiTxt = recentChat.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
-    rationale = rationale ? `${rationale}\n\nAI take: ${aiTxt}` : aiTxt;
-  }
-  const btn = document.querySelector('.sb-journal-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ ' + (lang==='ar'?'جاري الحفظ...':'Saving...'); }
-  const result = await saveToJournal({ ticker: t, source: 'dashboard', rationale,
-    confidence: _lastVerdict?.ticker === t ? _lastVerdict.confidence : null });
-  if (btn) {
-    if (result) {
-      btn.textContent = '✓ ' + (lang==='ar'?'محفوظ':'Saved');
-      btn.style.background = 'rgba(16,185,129,.15)';
-      btn.style.borderColor = 'rgba(16,185,129,.4)';
-      btn.style.color = '#10b981';
-      setTimeout(() => {
-        btn.textContent = '📓 ' + (lang==='ar'?'احفظ':'Save');
-        btn.style.background = '';
-        btn.style.borderColor = '';
-        btn.style.color = '';
-        btn.disabled = false;
-      }, 2500);
-    } else {
-      btn.textContent = '❌ ' + (lang==='ar'?'فشل':'Failed');
-      setTimeout(() => {
-        btn.textContent = '📓 ' + (lang==='ar'?'احفظ':'Save');
-        btn.disabled = false;
-      }, 2500);
+  el.innerHTML = `<div class="j-flag bad">⚠ ${isAr ? 'شرط خروج متحقق' : 'Exit condition triggered'}: ${triggered.map(c => escHtml(c.label)).join(' · ')}</div>`;
+}
+
+function readThesisConditionsFromDom() {
+  _thesisConditions = [...document.querySelectorAll('#thesisCondList .thesis-cond')].map(row => ({
+    id: row.dataset.id,
+    metric: row.querySelector('.tc-metric')?.value || 'note',
+    op: row.querySelector('.tc-op')?.value || 'below',
+    value: row.querySelector('.tc-value')?.value ?? '',
+    text: row.querySelector('.tc-text')?.value ?? '',
+  }));
+}
+
+function renderThesisConditions() {
+  const host = document.getElementById('thesisCondList');
+  if (!host) return;
+  const isAr = lang === 'ar';
+  host.innerHTML = _thesisConditions.map(c => {
+    const note = c.metric === 'note';
+    return `<div class="thesis-cond${note ? ' note' : ''}" data-id="${escHtml(c.id)}">
+      <select class="tc-metric thesis-input" onchange="readThesisConditionsFromDom(); renderThesisConditions()">
+        ${['revenue_growth', 'net_margin', 'price', 'pe', 'note'].map(m => {
+          const labels = {
+            revenue_growth: isAr ? 'نمو الإيرادات %' : 'Revenue growth %',
+            net_margin: isAr ? 'الهامش الصافي %' : 'Net margin %',
+            price: isAr ? 'السعر' : 'Price',
+            pe: isAr ? 'مضاعف الربح' : 'P/E',
+            note: isAr ? 'نص حر' : 'Free text',
+          };
+          return `<option value="${m}" ${c.metric === m ? 'selected' : ''}>${labels[m]}</option>`;
+        }).join('')}
+      </select>
+      ${note ? `<input class="tc-text thesis-input" value="${escHtml(c.text || '')}" placeholder="${isAr ? 'مثال: مغادرة الرئيس التنفيذي' : 'e.g. CEO leaves'}"/>`
+        : `<select class="tc-op thesis-input">
+            <option value="below" ${c.op !== 'above' ? 'selected' : ''}>${isAr ? 'أقل من' : 'below'}</option>
+            <option value="above" ${c.op === 'above' ? 'selected' : ''}>${isAr ? 'أعلى من' : 'above'}</option>
+          </select>
+          <input class="tc-value thesis-input" type="number" step="any" value="${escHtml(c.value ?? '')}" placeholder="${isAr ? 'الحد' : 'Threshold'}"/>`}
+      <button type="button" class="act-btn" onclick="readThesisConditionsFromDom(); _thesisConditions = _thesisConditions.filter(x => x.id !== '${escHtml(c.id)}'); renderThesisConditions()">✕</button>
+    </div>`;
+  }).join('') || `<div style="font-size:12px;color:var(--text3);margin-top:6px">${isAr ? 'لا توجد شروط بعد.' : 'No conditions yet.'}</div>`;
+}
+
+function openThesisModal(ticker) {
+  if (!ticker) return;
+  if (!isAiReady()) { showPinModal(); return; }
+  _thesisTicker = ticker;
+  _thesisRationale = autoRationale(ticker);
+  _thesisConditions = [];
+  const isAr = lang === 'ar';
+  const conf = _lastVerdict?.ticker === ticker && _lastVerdict.confidence != null ? _lastVerdict.confidence : '';
+  document.getElementById('thesisModal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'thesisModal';
+  modal.className = 'port-modal-bg';
+  modal.innerHTML = `<div class="port-modal" style="max-width:560px">
+    <div class="port-modal-hdr">
+      <h3>📓 ${isAr ? 'حفظ قرار' : 'Save decision'} · ${escHtml(ticker)}</h3>
+      <button class="port-modal-close" onclick="this.closest('.port-modal-bg').remove()">✕</button>
+    </div>
+    <div class="port-modal-body">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <label style="flex:1;font-size:12px;color:var(--text2)">${isAr ? 'الاتجاه' : 'Direction'}
+          <select id="thesisDir" style="width:100%;margin-top:4px;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text)">
+            <option value="long">${isAr ? 'شراء / طويل' : 'Long'}</option>
+            <option value="short">${isAr ? 'بيع / قصير' : 'Short'}</option>
+          </select>
+        </label>
+        <label style="width:120px;font-size:12px;color:var(--text2)">${isAr ? 'الثقة' : 'Confidence'}
+          <input id="thesisConf" type="number" min="0" max="100" value="${conf === '' ? '' : escHtml(String(conf))}" placeholder="0–100" style="width:100%;margin-top:4px;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text)"/>
+        </label>
+      </div>
+      <label style="display:block;margin-top:12px;font-size:12px;color:var(--text2)">${isAr ? 'أطروحة الاستثمار' : 'Investment thesis'}
+        <textarea id="thesisText" rows="4" placeholder="${isAr ? 'لماذا هذا القرار، وما الذي يجب أن يبقى صحيحاً؟' : 'Why this call, and what has to stay true?'}" style="width:100%;margin-top:4px;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:var(--font)"></textarea>
+      </label>
+      <div style="margin-top:12px;font-size:12px;color:var(--text2)">${isAr ? 'شروط الخروج أو المراجعة' : 'Exit or review conditions'}</div>
+      <div id="thesisCondList"></div>
+      <button type="button" class="act-btn" style="margin-top:8px" onclick="readThesisConditionsFromDom(); _thesisConditions.push({ id: 'c' + Date.now(), metric: 'revenue_growth', op: 'below', value: '', text: '' }); renderThesisConditions()">+ ${isAr ? 'شرط' : 'Condition'}</button>
+      ${_thesisRationale ? `<div class="j-note" style="margin-top:12px"><strong>${isAr ? 'لقطة تلقائية تُحفظ مع القرار' : 'Auto snapshot saved with the pick'}</strong><br>${escHtml(_thesisRationale).slice(0, 500)}</div>` : ''}
+      <div id="thesisStatus" class="j-note" style="margin-top:10px;display:none"></div>
+      <div class="port-modal-actions" style="margin-top:14px">
+        <button type="button" class="port-save-btn" id="thesisSaveBtn" onclick="submitThesis()">${isAr ? 'حفظ في السجل' : 'Save to journal'}</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+  renderThesisConditions();
+}
+
+async function submitThesis() {
+  readThesisConditionsFromDom();
+  const isAr = lang === 'ar';
+  const status = document.getElementById('thesisStatus');
+  const btn = document.getElementById('thesisSaveBtn');
+  const direction = document.getElementById('thesisDir')?.value || 'long';
+  const thesis = document.getElementById('thesisText')?.value || '';
+  const confRaw = document.getElementById('thesisConf')?.value;
+  const confidence = confRaw === '' || confRaw == null ? null : Number(confRaw);
+  if (btn) btn.disabled = true;
+  if (status) { status.style.display = 'block'; status.textContent = isAr ? 'جارٍ الحفظ...' : 'Saving...'; }
+  const result = await saveToJournal({
+    ticker: _thesisTicker,
+    direction,
+    thesis,
+    conditions: _thesisConditions,
+    confidence: confidence != null && isFinite(confidence) ? confidence : null,
+    source: 'dashboard',
+    rationale: _thesisRationale,
+  });
+  if (result && !result.error) {
+    document.getElementById('thesisModal')?.remove();
+    const saveBtn = document.querySelector('.sb-journal-btn');
+    if (saveBtn && activeTicker === _thesisTicker) {
+      saveBtn.textContent = '✓ ' + (isAr ? 'محفوظ' : 'Saved');
+      setTimeout(() => { saveBtn.textContent = '📓 ' + (isAr ? 'احفظ' : 'Save'); }, 2000);
     }
+    return;
+  }
+  if (btn) btn.disabled = false;
+  if (status) {
+    const msg = (result && result.error) || '';
+    const needsMig = /thesis|conditions|column|schema/i.test(msg);
+    status.textContent = needsMig
+      ? (isAr ? 'تعذّر الحفظ. شغّل ترحيل 009 في Supabase ثم أعد المحاولة.' : 'Could not save. Run migration 009 in Supabase, then try again.')
+      : (isAr ? 'تعذّر الحفظ. تحقق من السعر المحفوظ أو الاتصال.' : 'Could not save. Check that a price is stored, then try again.');
   }
 }
 
-// Open the journal view modal
+function quickSaveCurrentTicker() {
+  if (!activeTicker) return;
+  openThesisModal(activeTicker);
+}
+
+function showCloseBox(id) {
+  const box = document.getElementById('closeBox' + id);
+  if (!box) return;
+  const isAr = lang === 'ar';
+  const entry = _journalCache.find(e => String(e.id) === String(id));
+  const px = entry && STOCK[entry.ticker]?.price != null ? Number(STOCK[entry.ticker].price).toFixed(2) : '';
+  const today = new Date().toISOString().slice(0, 10);
+  box.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+    <input id="exitPx${id}" type="number" step="any" value="${escHtml(px)}" placeholder="${isAr ? 'سعر الخروج' : 'Exit price'}" style="width:120px;padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text)"/>
+    <input id="exitDt${id}" type="date" value="${today}" style="padding:6px 8px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text)"/>
+    <button type="button" class="act-btn" onclick="submitCloseBox(${id})">${isAr ? 'تأكيد الإغلاق' : 'Confirm close'}</button>
+  </div>`;
+}
+
+async function submitCloseBox(id) {
+  const price = document.getElementById('exitPx' + id)?.value;
+  const date = document.getElementById('exitDt' + id)?.value;
+  if (!price || !date) return;
+  const ok = await closeJournalEntry(id, Number(price), date);
+  if (ok) renderJournalBody();
+}
+
 async function showJournal() {
   if (!isAiReady()) {
     if (typeof showPinModal === 'function') showPinModal();
     return;
   }
   const isAr = lang === 'ar';
-  // Show modal with loading state first
+  document.getElementById('journalModal')?.remove();
   const modal = document.createElement('div');
+  modal.id = 'journalModal';
   modal.className = 'port-modal-bg';
-  modal.innerHTML = `<div class="port-dash">
+  modal.innerHTML = `<div class="port-dash journal-dash">
     <div class="port-dash-hdr">
-      <div class="port-dash-title">📓 ${isAr ? 'سجل توصياتي' : 'Decision Journal'}</div>
+      <div class="port-dash-title">📓 ${isAr ? 'سجل القرارات' : 'Decision Journal'}</div>
       <div class="port-dash-actions">
-        <button class="port-dash-btn" onclick="refreshJournalView()" title="${isAr?'تحديث':'Refresh'}">⟳ ${isAr ? 'تحديث' : 'Refresh'}</button>
+        <button class="port-dash-btn" onclick="refreshJournalView()">⟳ ${isAr ? 'تحديث' : 'Refresh'}</button>
         <button class="port-modal-close" onclick="this.closest('.port-modal-bg').remove()">✕</button>
       </div>
     </div>
@@ -3491,12 +3893,38 @@ async function showJournal() {
 
 async function refreshJournalView() { await renderJournalBody(); }
 
+function renderBreakTable(title, rows) {
+  const isAr = lang === 'ar';
+  const body = rows.length ? rows.map(r => `<div class="j-break-row"><span>${escHtml(r.label)} <span style="color:var(--text3)">· ${r.n}</span></span><span class="${r.avgExcess > 0 ? 'pos' : r.avgExcess < 0 ? 'neg' : 'neu'}">${r.hitRate == null ? 'n/a' : r.hitRate.toFixed(0) + '%'} · ${fmtPctOrNa(r.avgExcess)}</span></div>`).join('')
+    : `<div class="j-break-row"><span>${isAr ? 'لا بيانات' : 'No scored calls'}</span><span>n/a</span></div>`;
+  return `<div class="j-break"><h4>${title}</h4>${body}</div>`;
+}
+
+function renderCheckpointCell(cp) {
+  const isAr = lang === 'ar';
+  const label = isAr ? cp.labelAr : cp.labelEn;
+  if (cp.state === 'pending') {
+    return `<div class="j-cp"><div class="j-cp-k">${label}</div><div class="j-cp-v neu">${isAr ? 'لم يحن' : 'Not yet'}</div><div class="j-cp-s">${isAr ? 'قبل موعد المراجعة' : 'Checkpoint is still ahead'}</div></div>`;
+  }
+  if (cp.tickerReturn == null) {
+    return `<div class="j-cp"><div class="j-cp-k">${label}</div><div class="j-cp-v neu">n/a</div><div class="j-cp-s">${isAr ? 'لا سعر لهذه النقطة' : 'No price for this date'}</div></div>`;
+  }
+  const headline = cp.excess != null ? fmtPctOrNa(cp.excess) : fmtPctOrNa(cp.tickerReturn);
+  const mark = cp.hit == null ? '' : (cp.hit ? ' ✓' : ' ✗');
+  const cls = cp.excess == null ? (cp.tickerReturn > 0 ? 'pos' : cp.tickerReturn < 0 ? 'neg' : 'neu') : (cp.excess > 0 ? 'pos' : cp.excess < 0 ? 'neg' : 'neu');
+  const sub = cp.excess != null
+    ? `${isAr ? 'السهم' : 'Stock'} ${fmtPctOrNa(cp.tickerReturn)} · SPY ${fmtPctOrNa(cp.spyReturn)}`
+    : `${isAr ? 'السهم' : 'Stock'} ${fmtPctOrNa(cp.tickerReturn)} · SPY n/a`;
+  return `<div class="j-cp"><div class="j-cp-k">${label}</div><div class="j-cp-v ${cls}">${headline}${mark}</div><div class="j-cp-s">${sub}</div></div>`;
+}
+
 async function renderJournalBody() {
   const el = document.getElementById('journalBody');
   if (!el) return;
   const isAr = lang === 'ar';
-  el.innerHTML = `<div class="port-dash-empty">⏳ ${isAr ? 'تحميل البيانات الحية...' : 'Loading live performance...'}</div>`;
+  el.innerHTML = `<div class="port-dash-empty">⏳ ${isAr ? 'حساب الأداء...' : 'Computing performance...'}</div>`;
   const entries = await loadJournal();
+  _journalCache = entries;
   if (!entries.length) {
     if ((await cloudAuthOk()) === false) {
       el.innerHTML = memoryLockHtml();
@@ -3505,97 +3933,61 @@ async function renderJournalBody() {
     el.innerHTML = `<div class="port-dash-empty" style="padding:40px 20px">
       <div style="font-size:42px;margin-bottom:14px">📓</div>
       <div style="font-size:14px;color:var(--text);font-weight:600;margin-bottom:6px">${isAr ? 'السجل فارغ' : 'Your journal is empty'}</div>
-      <div style="font-size:12px;color:var(--text3);max-width:380px;margin:0 auto;line-height:1.5">${isAr ? 'احفظ التوصيات من لوحة معلومات السهم لتتبع أدائها مقابل SPY بمرور الوقت.' : 'Save picks from any ticker dashboard to track their performance vs SPY over time. The aggregate stats will tell you whether your AI picks generate alpha.'}</div>
+      <div style="font-size:12px;color:var(--text3);max-width:420px;margin:0 auto;line-height:1.5">${isAr ? 'من صفحة الشركة احفظ أطروحة وشروط خروج. سيُقارن القرار لاحقاً بمؤشر SPY.' : 'From a company page, save a thesis and exit conditions. The call is later compared with SPY.'}</div>
     </div>`;
     return;
   }
-  const rows = await computeAllJournalPerf(entries);
-  // Compute aggregate stats
-  const closedRows = rows.filter(r => r.ticker_return_pct != null);
-  const winners = closedRows.filter(r => r.is_winner);
-  const losers = closedRows.filter(r => r.is_winner === false);
-  const winRate = closedRows.length ? (winners.length / closedRows.length * 100) : 0;
-  const avgAlpha = closedRows.length ? closedRows.reduce((s, r) => s + (r.alpha_pct || 0), 0) / closedRows.length : 0;
-  const avgReturn = closedRows.length ? closedRows.reduce((s, r) => s + (r.ticker_return_pct || 0), 0) / closedRows.length : 0;
-  const avgSpyReturn = closedRows.length ? closedRows.reduce((s, r) => s + (r.spy_return_pct || 0), 0) / closedRows.length : 0;
-  const openCount = entries.filter(e => !e.closed).length;
-  const alphaClass = avgAlpha > 0 ? 'pos' : avgAlpha < 0 ? 'neg' : 'neu';
-
-  const fmtPct = (n, dp = 2) => n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(dp) + '%';
-  const cls = (n) => n == null ? 'neu' : n > 0 ? 'pos' : n < 0 ? 'neg' : 'neu';
+  const rows = await enrichJournalEntries(entries);
+  if (!document.getElementById('journalBody')) return;
+  const scored = rows.filter(r => r.verdict);
+  const hits = scored.filter(r => r.verdict.hit).length;
+  const hitRate = scored.length ? hits / scored.length * 100 : null;
+  const avgExcess = scored.length ? scored.reduce((s, r) => s + r.verdict.excess, 0) / scored.length : null;
+  const triggeredN = rows.filter(r => !r.closed && r.evaluated.some(c => c.triggered)).length;
+  const openN = rows.filter(r => !r.closed).length;
 
   const cards = `<div class="port-dash-cards">
-    <div class="port-card">
-      <div class="port-card-lbl">${isAr ? 'إجمالي التوصيات' : 'Total Picks'}</div>
-      <div class="port-card-val">${entries.length}</div>
-      <div class="port-card-sub">${openCount} ${isAr ? 'مفتوح' : 'open'} · ${entries.length - openCount} ${isAr ? 'مغلق' : 'closed'}</div>
-    </div>
-    <div class="port-card">
-      <div class="port-card-lbl">${isAr ? 'نسبة الفوز' : 'Win Rate'}</div>
-      <div class="port-card-val ${winRate >= 50 ? 'pos' : 'neg'}">${winRate.toFixed(0)}%</div>
-      <div class="port-card-sub">${winners.length}W / ${losers.length}L</div>
-    </div>
-    <div class="port-card">
-      <div class="port-card-lbl">${isAr ? 'متوسط العائد' : 'Avg Return'}</div>
-      <div class="port-card-val ${cls(avgReturn)}">${fmtPct(avgReturn)}</div>
-      <div class="port-card-sub">${isAr ? 'SPY:' : 'SPY:'} ${fmtPct(avgSpyReturn)}</div>
-    </div>
-    <div class="port-card">
-      <div class="port-card-lbl">${isAr ? 'ألفا ضد SPY' : 'Alpha vs SPY'}</div>
-      <div class="port-card-val ${alphaClass}">${fmtPct(avgAlpha)}</div>
-      <div class="port-card-sub">${avgAlpha > 0 ? (isAr ? '✓ يتفوق' : '✓ outperforming') : avgAlpha < 0 ? (isAr ? '✗ يتأخر' : '✗ underperforming') : '—'}</div>
-    </div>
+    <div class="port-card"><div class="port-card-lbl">${isAr ? 'نسبة الإصابة' : 'Hit rate'}</div><div class="port-card-val ${hitRate == null ? '' : hitRate >= 50 ? 'pos' : 'neg'}">${hitRate == null ? 'n/a' : hitRate.toFixed(0) + '%'}</div><div class="port-card-sub">${scored.length ? `${hits}/${scored.length} ${isAr ? 'تفوقت على SPY' : 'beat SPY'}` : (isAr ? 'لا مقارنة مكتملة' : 'No complete SPY compare')}</div></div>
+    <div class="port-card"><div class="port-card-lbl">${isAr ? 'متوسط العائد الزائد' : 'Avg excess return'}</div><div class="port-card-val ${avgExcess > 0 ? 'pos' : avgExcess < 0 ? 'neg' : ''}">${fmtPctOrNa(avgExcess)}</div><div class="port-card-sub">${isAr ? 'باتجاه القرار مقابل SPY' : 'In the stated direction vs SPY'}</div></div>
+    <div class="port-card"><div class="port-card-lbl">${isAr ? 'مفتوحة / مغلقة' : 'Open / closed'}</div><div class="port-card-val">${openN}/${rows.length - openN}</div><div class="port-card-sub">${rows.length} ${isAr ? 'قرار' : 'decisions'}</div></div>
+    <div class="port-card"><div class="port-card-lbl">${isAr ? 'شروط متحققة' : 'Conditions triggered'}</div><div class="port-card-val ${triggeredN ? 'neg' : ''}">${triggeredN}</div><div class="port-card-sub">${isAr ? 'صفقات مفتوحة' : 'On open picks'}</div></div>
   </div>`;
 
-  const tableHdr = `<div class="port-thead" style="grid-template-columns:1.4fr 0.9fr 0.7fr 0.9fr 0.9fr 0.7fr 40px">
-    <div class="port-tcell port-tcell-ticker">${isAr ? 'السهم / المصدر' : 'Stock / Source'}</div>
-    <div class="port-tcell">${isAr ? 'دخول / حالياً' : 'Entry / Now'}</div>
-    <div class="port-tcell">${isAr ? 'أيام' : 'Days'}</div>
-    <div class="port-tcell port-tcell-pl">${isAr ? 'العائد' : 'Return'}</div>
-    <div class="port-tcell port-tcell-pl">${isAr ? 'SPY' : 'SPY'}</div>
-    <div class="port-tcell port-tcell-pl">${isAr ? 'ألفا' : 'Alpha'}</div>
-    <div class="port-tcell port-tcell-actions"></div>
+  const breaks = `<div class="j-breaks">
+    ${renderBreakTable(isAr ? 'حسب الثقة' : 'By confidence', groupJournal(rows, confBucket))}
+    ${renderBreakTable(isAr ? 'حسب المصدر' : 'By source', groupJournal(rows, r => r.source || 'manual'))}
+    ${renderBreakTable(isAr ? 'حسب القطاع' : 'By sector', groupJournal(rows, r => STOCK[r.ticker]?.sector || (isAr ? 'غير معروف' : 'Unknown')))}
   </div>`;
 
-  const rowsHtml = rows.map(r => {
-    const aClass = cls(r.alpha_pct);
-    const isOpen = !r.closed;
-    return `<div class="port-trow" style="grid-template-columns:1.4fr 0.9fr 0.7fr 0.9fr 0.9fr 0.7fr 40px">
-      <div class="port-tcell port-tcell-ticker" onclick="onTickerClick('${r.ticker}'); this.closest('.port-modal-bg').remove();">
-        <div class="port-tt-name">${r.ticker}</div>
-        <div class="port-tt-sym" style="text-transform:none;letter-spacing:0">${r.source || 'manual'}${r.confidence ? ` · ${Math.round(r.confidence)}%` : ''}</div>
+  const note = `<div class="j-note">${isAr
+    ? '3 و6 و12 شهراً تحتاج سعر السهم وSPY في ذلك التاريخ. إن تعذّر جلب السجل يظهر n/a، ويُستخدم السعر المخزّن للنقطة الحالية إن وُجد. «لم يحن» يعني أن الموعد لم يأتِ بعد. الإصابة تعني أن الاتجاه المختار تفوّق على SPY.'
+    : 'The 3, 6, and 12 month marks need the stock and SPY prices on that date. If that history cannot be loaded they show n/a. Current uses the stored price when a live quote is missing. “Not yet” means the date is still ahead. A hit means the stated direction beat SPY.'}</div>`;
+
+  const cardsHtml = rows.map(r => {
+    const sector = STOCK[r.ticker]?.sector || '';
+    const dir = r.direction === 'short' ? (isAr ? 'قصير' : 'Short') : (isAr ? 'طويل' : 'Long');
+    const conds = (r.evaluated || []).map(c => `<div class="j-cond"><div><div>${escHtml(c.label)}</div>${c.detail ? `<div style="color:var(--text3);font-size:11px">${escHtml(c.detail)}</div>` : ''}</div><span class="j-pill ${c.triggered ? 'on' : 'off'}">${c.manual ? (isAr ? 'مراجعة' : 'Review') : c.unknown ? 'n/a' : c.triggered ? (isAr ? 'متحقق' : 'Triggered') : (isAr ? 'هادئ' : 'Quiet')}</span></div>`).join('');
+    const cps = (r.checkpoints || []).map(renderCheckpointCell).join('');
+    return `<article class="j-card">
+      <div class="j-card-h">
+        <div>
+          <div class="j-title" onclick="onTickerClick('${escHtml(r.ticker)}'); document.getElementById('journalModal')?.remove()">${escHtml(r.ticker)} · ${dir}</div>
+          <div class="j-meta">${escHtml(r.source || 'manual')}${sector ? ' · ' + escHtml(sector) : ''}${r.confidence != null ? ' · ' + Math.round(Number(r.confidence)) : ''} · ${new Date(r.saved_at).toLocaleDateString()} ${r.closed ? (isAr ? '· مغلق' : '· closed') : ''}</div>
+        </div>
+        <div class="j-meta">${isAr ? 'دخول' : 'Entry'} $${Number(r.entry_price).toFixed(2)}${r.spy_entry_price != null ? ' · SPY $' + Number(r.spy_entry_price).toFixed(2) : ' · SPY n/a'}</div>
       </div>
-      <div class="port-tcell">
-        <div class="port-tc-main">$${(r.current_price ?? 0).toFixed(2)}</div>
-        <div class="port-tc-sub">${isAr?'دخول:':'in:'} $${r.entry_price.toFixed(2)}</div>
+      ${r.thesis ? `<div class="j-thesis">${escHtml(r.thesis)}</div>` : ''}
+      <div class="j-checkpoints">${cps}</div>
+      ${conds ? `<div style="margin-top:8px">${conds}</div>` : ''}
+      <div class="j-actions">
+        ${r.closed ? '' : `<button type="button" class="act-btn" onclick="showCloseBox(${r.id})">${isAr ? 'إغلاق' : 'Close'}</button>`}
+        <button type="button" class="act-btn" onclick="if(confirm('${isAr ? 'حذف' : 'Delete'} ${escHtml(r.ticker)}?')) deleteJournalEntry(${r.id}).then(ok => { if (ok) renderJournalBody(); })">✕</button>
       </div>
-      <div class="port-tcell">
-        <div class="port-tc-main">${r.days_held}d</div>
-        <div class="port-tc-sub">${new Date(r.saved_at).toLocaleDateString()}</div>
-      </div>
-      <div class="port-tcell port-tcell-pl">
-        <div class="port-tc-main ${cls(r.ticker_return_pct)}">${fmtPct(r.ticker_return_pct)}</div>
-      </div>
-      <div class="port-tcell port-tcell-pl">
-        <div class="port-tc-main ${cls(r.spy_return_pct)}" style="font-size:11.5px">${fmtPct(r.spy_return_pct)}</div>
-      </div>
-      <div class="port-tcell port-tcell-pl">
-        <div class="port-tc-main ${aClass}">${fmtPct(r.alpha_pct)}</div>
-        <div class="port-tc-sub ${aClass}">${r.is_winner ? '✓' : r.is_winner === false ? '✗' : '—'}</div>
-      </div>
-      <div class="port-tcell port-tcell-actions">
-        ${isOpen ? `<button class="port-row-del" title="${isAr?'حذف':'Delete'}" onclick="event.stopPropagation(); if(confirm('${isAr?'حذف':'Delete'} ${r.ticker}?')) { deleteJournalEntry(${r.id}).then(()=>renderJournalBody()); }">✕</button>` : ''}
-      </div>
-    </div>`;
+      <div id="closeBox${r.id}"></div>
+    </article>`;
   }).join('');
 
-  const note = closedRows.length < 5
-    ? `<div style="background:rgba(245,158,11,.08);border:1px dashed rgba(245,158,11,.4);border-radius:8px;padding:10px 14px;font-size:11.5px;color:var(--text2);line-height:1.5">
-        💡 <strong>${isAr?'تنبيه إحصائي:':'Statistical note:'}</strong> ${isAr?'تحتاج إلى ما لا يقل عن 20 توصية وثلاثة أشهر من البيانات للتمييز بين المهارة والصدفة. حالياً:':'You need at least 20 picks and 3+ months of data to distinguish skill from luck. Right now:'} ${closedRows.length} ${isAr?'توصيات':'picks'}.
-      </div>`
-    : '';
-
-  el.innerHTML = cards + note + `<div class="port-table">${tableHdr}${rowsHtml}</div>`;
+  el.innerHTML = cards + breaks + note + `<div class="j-cards">${cardsHtml}</div>`;
 }
 
 // ── KNOWLEDGE GRAPH (Phase 3) ──────────────────────────────────────────────
@@ -6447,6 +6839,7 @@ function loadTicker(ticker) {
       </div>
 
       ${stkHtml}
+      <div id="thesisFlag"></div>
       ${rangeHtml}
       ${decisionHtml}
       ${profileHtml}
@@ -6576,6 +6969,7 @@ function loadTicker(ticker) {
     setTimeout(() => {
       drawCharts(ticker, rows, m);
       loadCompanyNews(ticker);
+      renderCompanyThesisFlag(ticker);
       // Live quote and price history need the signed-in FMP proxy. Change stays
       // on the explicit "n/a" label when the quote never arrives.
       if (isAiReady()) {

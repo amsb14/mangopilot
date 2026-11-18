@@ -101,6 +101,7 @@ body:not(.light)::after{content:'';position:fixed;inset:0;background-image:url("
 .journal-sidebar-trigger:hover{color:var(--accent)}
 .journal-badge{display:inline-flex;align-items:center;justify-content:center;background:rgba(59,130,246,.18);color:#3b82f6;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;min-width:18px}
 .journal-badge.hidden{display:none}
+.journal-badge-alert{background:rgba(239,68,68,.16);color:#ef4444;margin-inline-start:4px}
 
 /* "Sync new ticker" affordance in header search dropdown */
 .hdr-search-sync{padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:11px;background:linear-gradient(90deg,rgba(59,130,246,.08),rgba(59,130,246,.02));border-top:1px dashed rgba(59,130,246,.3);transition:background .15s}
@@ -1126,4 +1127,40 @@ body.light .chat-welcome-icon{background:rgba(59,130,246,.06);border-color:rgba(
 /* Add/sync affordance pinned to the top of the search dropdown (always reachable) */
 .hdr-search-sync.hdr-sync-top{border-top:none;border-bottom:1px dashed rgba(59,130,246,.3);border-radius:10px 10px 0 0}
 .hdr-search-sync.hdr-sync-top.hdr-sync-disabled{border-bottom:1px dashed var(--border)}
+
+/* Decision journal: checkpoints, thesis, exit conditions */
+.port-modal-bg > .port-dash{background:var(--bg);border:1px solid var(--border);border-radius:14px;width:100%;max-width:920px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.45)}
+.journal-dash{max-width:1080px}
+.thesis-input{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:var(--font);font-size:13px;letter-spacing:0;text-align:start}
+.j-note{font-size:11.5px;color:var(--text2);line-height:1.45;background:var(--surface2);border:1px dashed var(--border);border-radius:8px;padding:8px 12px}
+.j-breaks{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.j-break{border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:10px 12px}
+.j-break h4{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin-bottom:8px}
+.j-break-row{display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:4px 0;border-top:1px solid var(--border)}
+.j-break-row span:last-child{font-weight:650;white-space:nowrap}
+.j-cards{display:flex;flex-direction:column;gap:10px}
+.j-card{border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:12px 14px}
+.j-card-h{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.j-title{font-weight:700;font-size:15px;cursor:pointer;color:var(--accent)}
+.j-meta{font-size:11px;color:var(--text3);margin-top:2px}
+.j-thesis{font-size:13px;color:var(--text2);line-height:1.45;margin-top:8px}
+.j-checkpoints{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.j-cp{border:1px solid var(--border);border-radius:8px;padding:8px;background:var(--surface2);min-width:0}
+.j-cp-k{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text3)}
+.j-cp-v{font-size:14px;font-weight:700;margin-top:2px}
+.j-cp-s{font-size:11px;color:var(--text3);margin-top:2px;line-height:1.35}
+.j-flag{font-size:12px;font-weight:600;padding:8px 10px;border-radius:8px;margin-top:8px;line-height:1.4}
+.j-flag.bad{background:rgba(239,68,68,.1);color:var(--red);border:1px solid rgba(239,68,68,.35)}
+.j-flag.ok{background:rgba(16,185,129,.08);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.j-cond{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px;padding:6px 0;border-top:1px solid var(--border)}
+.j-pill{font-size:10px;font-weight:700;border-radius:99px;padding:2px 8px;white-space:nowrap}
+.j-pill.on{background:rgba(239,68,68,.15);color:var(--red)}
+.j-pill.off{background:var(--surface2);color:var(--text3)}
+.j-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.thesis-cond{display:grid;grid-template-columns:1.3fr .8fr .8fr auto;gap:6px;align-items:center;margin-top:6px}
+.thesis-cond.note{grid-template-columns:1.3fr 1fr auto}
+@media(max-width:800px){
+  .j-checkpoints,.j-breaks{grid-template-columns:1fr 1fr}
+  .thesis-cond,.thesis-cond.note{grid-template-columns:1fr}
+}
 
