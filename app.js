@@ -3498,6 +3498,10 @@ async function renderJournalBody() {
   el.innerHTML = `<div class="port-dash-empty">⏳ ${isAr ? 'تحميل البيانات الحية...' : 'Loading live performance...'}</div>`;
   const entries = await loadJournal();
   if (!entries.length) {
+    if ((await cloudAuthOk()) === false) {
+      el.innerHTML = memoryLockHtml();
+      return;
+    }
     el.innerHTML = `<div class="port-dash-empty" style="padding:40px 20px">
       <div style="font-size:42px;margin-bottom:14px">📓</div>
       <div style="font-size:14px;color:var(--text);font-weight:600;margin-bottom:6px">${isAr ? 'السجل فارغ' : 'Your journal is empty'}</div>
@@ -5380,6 +5384,11 @@ function toggleWatchlist(ticker) {
 function renderWatchlistPanel() {
   const el = document.getElementById('watchlistPanel');
   if (!el) return;
+  if (_memoryLocked) {
+    el.classList.remove('hidden');
+    el.innerHTML = memoryLockHtml();
+    return;
+  }
   if (!watchlist.length) { el.classList.add('hidden'); return; }
   el.classList.remove('hidden');
   const isAr = lang === 'ar';
@@ -8917,6 +8926,43 @@ function showDataSourcePage(tab) {
 // ── AUTH + PERSISTENT MEMORY (Shared Password + Supabase) ─────────────────────
 let USER_AUTH_HASH = null;
 let memorySaveTimeout = null;
+// null = not checked yet. false = signed in, but app_auth does not match this hash.
+let _cloudAuthOk = null;
+let _memoryLocked = false;
+
+function resetCloudAuthCache() {
+  _cloudAuthOk = null;
+  _memoryLocked = false;
+}
+
+// True when the password hash on this sign-in matches public.app_auth.
+// A mismatch makes RLS return zero rows with no error, which looks like an empty list.
+async function cloudAuthOk() {
+  if (!isAiReady()) return false;
+  if (_cloudAuthOk !== null) return _cloudAuthOk;
+  const sb = getSupabase();
+  if (!sb) return false;
+  try {
+    const { data, error } = await sb.rpc('request_auth_ok');
+    if (error) return true;
+    _cloudAuthOk = data === true;
+    return _cloudAuthOk;
+  } catch {
+    return true;
+  }
+}
+
+function memoryLockHtml() {
+  const isAr = lang === 'ar';
+  const title = isAr ? 'الذاكرة السحابية مقفلة' : 'Cloud memory is locked';
+  const body = isAr
+    ? 'تم تسجيل الدخول، لكن التحقق المخزّن في Supabase لا يطابق كلمة المرور هذه. قائمة المراقبة والسجل يظهران فارغين حتى يتطابق التجزئة.'
+    : 'You are signed in, but the hash stored in Supabase does not match this password. The watchlist and My Picks stay empty until it matches.';
+  return `<div class="news-state" style="margin:12px 0;text-align:start">
+    <div class="news-state-title">${title}</div>
+    <div class="news-state-sub" style="margin-bottom:0">${body}</div>
+  </div>`;
+}
 
 async function hashPassword(password) {
   const encoder = new TextEncoder();
@@ -8981,6 +9027,7 @@ async function submitPassword() {
 
     USER_AUTH_HASH = hash;
     try { localStorage.setItem('sfa_auth_hash', USER_AUTH_HASH); } catch(e) {}
+    resetCloudAuthCache();
 
     await loadMemoryFromCloud();
     updateMemoryBadge();
@@ -8996,6 +9043,7 @@ function signOut() {
   USER_AUTH_HASH = null;
   agentMemory = {};
   watchlist = [];
+  resetCloudAuthCache();
   try { localStorage.removeItem('sfa_auth_hash'); } catch(e) {}
   getSupabase();
   renderWatchlistPanel();
@@ -9029,8 +9077,16 @@ async function loadMemoryFromCloud() {
 
   try {
     const { data, error } = await sb.from('user_memory').select('key, value').eq('pin_hash', SHARED_MEMORY_ID);
-    if (error) { console.warn('Memory load error:', error.message); return false; }
-    if (!data || !data.length) return false;
+    if (error) { console.warn('Memory load error:', error.message); _memoryLocked = false; renderWatchlistPanel(); return false; }
+    if (!data || !data.length) {
+      // RLS returns [] both for "no rows" and for "hash does not match".
+      _memoryLocked = (await cloudAuthOk()) === false;
+      if (_memoryLocked) console.warn('Cloud memory locked: x-auth-hash does not match app_auth.password_hash');
+      renderWatchlistPanel();
+      return false;
+    }
+    _memoryLocked = false;
+    _cloudAuthOk = true;
 
     data.forEach(row => {
       if (row.key === 'watchlist') watchlist = row.value || [];
