@@ -23,6 +23,13 @@ const ALLOWED_ENDPOINTS = new Set([
   "biggest-gainers",
   "biggest-losers",
   "most-active",
+  // Financial statements + profile. Used by the signed-in sync path so the
+  // browser never puts the FMP key in a query string. Still read-only.
+  "income-statement",
+  "balance-sheet-statement",
+  "cash-flow-statement",
+  "profile",
+  "analyst-estimates",
 ]);
 
 // Only pass through scalar (string/number) params, and never let the client override apikey.

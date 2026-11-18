@@ -63,7 +63,8 @@
         <button class="act-btn" onclick="showHeatmap()" style="flex:1;font-size:10px;padding:5px 8px">🗺️ Heatmap</button>
         <button class="act-btn" onclick="backToChat()" style="flex:1;font-size:10px;padding:5px 8px">💬 Chat</button>
       </div>
-      <input class="sidebar-search" id="sidebarSearch" placeholder="Search…" oninput="filterSidebar()" />
+      <input class="sidebar-search" id="sidebarSearch" placeholder="Search all companies…" oninput="filterSidebar()" />
+      <div class="sidebar-search-hint" id="sidebarSearchHint"></div>
       <div class="sector-list" id="sectorList"></div>
     </div>
     <div class="sidebar-section" style="border-bottom:1px solid var(--border);padding-bottom:10px">

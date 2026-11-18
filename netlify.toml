@@ -15,6 +15,14 @@
   status = 404
   force = true
 
+# Owner-only sync page. It asks for a service-role key and an FMP key in the
+# browser. The in-app refresh goes through the sync-ticker edge function.
+[[redirects]]
+  from = "/admin_sync_tool.html"
+  to = "/404.html"
+  status = 404
+  force = true
+
 # Nexus-intel reference research material (not part of the public app)
 [[redirects]]
   from = "/nexus-intel/*"
