@@ -198,7 +198,7 @@ en:{
   hw2T:'Compare Companies', hw2X:'Click "+ Compare" on any dashboard to add it to a comparison. Up to 5 companies.',
   hw3T:'Upload Your Own', hw3X:'Use the upload button to add your own CSV or Excel statements with auto schema detection.',
   hdrSearchPlaceholder:'Search ticker or company…',
-  sidebarSearchPlaceholder:'Search…',
+  sidebarSearchPlaceholder:'Search all companies…',
   langLbl:'العربية',
   themeLight:'☀️', themeDark:'🌙',
   cmpBarLabel:'Comparing:', cmpGoBtn:'Compare →',
@@ -231,7 +231,7 @@ ar:{
   hw2T:'قارن الشركات', hw2X:'انقر على "+ مقارنة" في أي لوحة لإضافتها. يمكنك مقارنة حتى 5 شركات.',
   hw3T:'ارفع ملفك', hw3X:'استخدم زر الرفع لإضافة قوائمك المالية CSV أو Excel مع اكتشاف تلقائي للمخطط.',
   hdrSearchPlaceholder:'ابحث عن رمز أو شركة…',
-  sidebarSearchPlaceholder:'بحث…',
+  sidebarSearchPlaceholder:'ابحث في كل الشركات…',
   langLbl:'English',
   themeLight:'☀️', themeDark:'🌙',
   cmpBarLabel:'المقارنة:', cmpGoBtn:'قارن →',
@@ -357,6 +357,36 @@ function fN(n, dp=2) { if (n==null||isNaN(n)) return T('noData'); return n.toFix
 function sCol(s) { if(s>=8) return '#10b981'; if(s>=6.5) return '#3b82f6'; if(s>=5) return '#f59e0b'; return '#ef4444'; }
 function pc(v) { if(v==null||isNaN(v)) return 'neu'; return v>0?'pos':v<0?'neg':'neu'; }
 
+// Outlier-robust center. Sector ratios (growth, margin) are skewed by a few
+// extreme companies, so comparisons use this instead of the mean.
+function median(values) {
+  const v = [];
+  for (const x of values || []) {
+    if (x == null || !isFinite(x)) continue;
+    v.push(x);
+  }
+  if (!v.length) return null;
+  v.sort((a, b) => a - b);
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+// Latest finite value of a metric series (rows are chronological).
+function latestMetric(rows, key) {
+  if (!rows) return null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const x = rows[i] && rows[i][key];
+    if (x != null && isFinite(x)) return x;
+  }
+  return null;
+}
+
+function coerceNum(v) {
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/%/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
 // ── SIDEBAR ───────────────────────────────────────────────────────────────────
 function buildSidebar() {
   if (!TICKERS.length) {
@@ -477,10 +507,41 @@ function passesScreener(t) {
 }
 
 function renderSidebarTickers() {
-  const q = sidebarQuery;
+  const q = (sidebarQuery || '').trim();
   let list = TICKERS;
-  if (activeSector) list = list.filter(t => STOCK[t]?.sector === activeSector);
-  if (q) list = list.filter(t => t.toLowerCase().includes(q) || (STOCK[t]?.industry||'').toLowerCase().includes(q));
+  // A query searches the whole universe. The sector list only narrows the
+  // browse list when the box is empty — otherwise AAPL disappears while
+  // another sector is selected.
+  const searchingAll = q.length > 0;
+  if (activeSector && !searchingAll) list = list.filter(t => STOCK[t]?.sector === activeSector);
+  if (searchingAll) {
+    list = list.filter(t => {
+      const stk = STOCK[t] || {};
+      return t.toLowerCase().includes(q)
+        || (stk.companyName || '').toLowerCase().includes(q)
+        || (stk.industry || '').toLowerCase().includes(q)
+        || (stk.sector || '').toLowerCase().includes(q);
+    });
+    list = [...list].sort((a, b) => {
+      const rank = (t) => t.toLowerCase() === q ? 0 : t.toLowerCase().startsWith(q) ? 1 : 2;
+      return rank(a) - rank(b) || a.localeCompare(b);
+    });
+  }
+
+  const hint = document.getElementById('sidebarSearchHint');
+  if (hint) {
+    if (searchingAll) {
+      hint.textContent = lang === 'ar'
+        ? `نتائج من كل القطاعات (${list.length})`
+        : `All sectors · ${list.length} match${list.length === 1 ? '' : 'es'}`;
+    } else if (activeSector) {
+      hint.textContent = lang === 'ar'
+        ? `معروض: ${activeSector} — اكتب للبحث في كل الشركات`
+        : `Showing ${activeSector} — type to search every company`;
+    } else {
+      hint.textContent = lang === 'ar' ? 'البحث يشمل كل الشركات' : 'Search covers every company';
+    }
+  }
 
   // Apply screener filters
   const hasScreener = screenerFilters.price || screenerFilters.score || screenerFilters.value;
@@ -490,12 +551,17 @@ function renderSidebarTickers() {
   const lblEl = document.getElementById('sidebarTickersLabel');
   if (lblEl) lblEl.innerHTML = (lang === 'ar' ? 'الشركات' : 'Companies') + countLabel;
 
-  document.getElementById('sidebarTickers').innerHTML = list.slice(0,80).map(t =>
-    `<div class="ticker-row${activeTicker===t?' active':''}" onclick="onTickerClick('${t}')">
+  document.getElementById('sidebarTickers').innerHTML = list.slice(0,80).map(t => {
+    const stk = STOCK[t] || {};
+    const meta = searchingAll
+      ? [stk.sector, stk.industry].filter(Boolean).join(' · ')
+      : (stk.industry || '');
+    const title = escHtml(stk.companyName || '');
+    return `<div class="ticker-row${activeTicker===t?' active':''}" onclick="onTickerClick('${t}')">
       <span style="font-weight:700;font-size:13px">${t}</span>
-      <span class="ticker-row-name">${STOCK[t]?.industry||''}${stk_price_tag(t)}</span>
-    </div>`
-  ).join('') + (list.length > 80 ? `<div style="padding:8px 10px;font-size:11px;color:var(--text3)">${list.length-80} more — search to filter</div>` : '');
+      <span class="ticker-row-name" title="${title}">${escHtml(meta)}${stk_price_tag(t)}</span>
+    </div>`;
+  }).join('') + (list.length > 80 ? `<div style="padding:8px 10px;font-size:11px;color:var(--text3)">${list.length-80} more — search to filter</div>` : '');
 }
 
 // Show price in sidebar when screener active
@@ -560,7 +626,7 @@ function onHdrSearch() {
   }
 
   let itemsHtml = dropItems.map((t, i) =>
-    `<div class="hdr-search-item" onclick="pickTicker('${t}')" id="drop-item-${i}">
+    `<div class="hdr-search-item" onmousedown="pickTicker('${t}', event)" id="drop-item-${i}">
       <span class="hdr-search-ticker">${t}</span>
       <span class="hdr-search-meta">${STOCK[t]?.industry||''} · ${STOCK[t]?.sector||''}</span>
     </div>`
@@ -605,7 +671,10 @@ function onHdrKey(e) {
   if (!drop.classList.contains('open')) return;
   if (e.key === 'ArrowDown') { dropIdx = Math.min(dropIdx+1, dropItems.length-1); highlightDrop(); e.preventDefault(); }
   else if (e.key === 'ArrowUp') { dropIdx = Math.max(dropIdx-1, -1); highlightDrop(); e.preventDefault(); }
-  else if (e.key === 'Enter' && dropIdx >= 0) { pickTicker(dropItems[dropIdx]); e.preventDefault(); }
+  else if (e.key === 'Enter') {
+    const pick = dropIdx >= 0 ? dropItems[dropIdx] : dropItems[0];
+    if (pick) { pickTicker(pick); e.preventDefault(); }
+  }
   else if (e.key === 'Escape') { drop.classList.remove('open'); }
 }
 
@@ -617,15 +686,26 @@ function highlightDrop() {
 
 function openDrop() { if (document.getElementById('hdrSearch').value) onHdrSearch(); }
 
-function pickTicker(t) {
-  document.getElementById('hdrSearch').value = '';
-  document.getElementById('hdrDrop').classList.remove('open');
+function pickTicker(t, ev) {
+  // mousedown + preventDefault so the result is chosen before the input blurs
+  // and before a full-screen overlay (the sign-in modal) can swallow the click.
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+  const input = document.getElementById('hdrSearch');
+  const drop = document.getElementById('hdrDrop');
+  if (input) input.value = '';
+  if (drop) drop.classList.remove('open');
   onTickerClick(t);
 }
 
 // Close drop on outside click
 document.addEventListener('click', e => {
-  if (!e.target.closest('.hdr-search-wrap')) document.getElementById('hdrDrop').classList.remove('open');
+  if (!e.target.closest('.hdr-search-wrap')) document.getElementById('hdrDrop')?.classList.remove('open');
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const pin = document.getElementById('pinOverlay');
+  if (pin) { pin.remove(); e.preventDefault(); }
 });
 
 // ── METRICS ENGINE ────────────────────────────────────────────────────────────
@@ -690,20 +770,27 @@ function getSectorBenchmarks(ticker) {
   if (!sec) return null;
   const peers = TICKERS.filter(t => t !== ticker && STOCK[t]?.sector === sec && ANNUAL[t]?.length);
   if (peers.length < 3) return null;
-  const peerMetrics = peers.map(t => {
+  // One vote per company (latest year), then the median. A mean of every
+  // historical print lets a single loss-making outlier drag the sector.
+  const rows = peers.map(t => {
     const m = calcMetrics(ANNUAL[t]);
     const s = calcScores(m);
-    return { m, s };
+    return {
+      overall: s.overall,
+      growth: latestMetric(m.yoy, 'revenue_growth'),
+      margin: latestMetric(m.prof, 'net_margin'),
+      dte: latestMetric(m.lev, 'dte'),
+      roe: latestMetric(m.prof, 'roe'),
+    };
   });
-  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
   return {
     sector: sec,
     count: peers.length + 1,
-    avgOverall: avg(peerMetrics.map(p => p.s.overall).filter(v => v != null)),
-    avgGrowth: avg(peerMetrics.flatMap(p => p.m.yoy.map(y => y.revenue_growth)).filter(v => v != null)),
-    avgMargin: avg(peerMetrics.flatMap(p => p.m.prof.map(p2 => p2.net_margin)).filter(v => v != null)),
-    avgDTE: avg(peerMetrics.flatMap(p => p.m.lev.map(l => l.dte)).filter(v => v != null)),
-    avgROE: avg(peerMetrics.flatMap(p => p.m.prof.map(p2 => p2.roe)).filter(v => v != null)),
+    medOverall: median(rows.map(r => r.overall)),
+    medGrowth: median(rows.map(r => r.growth)),
+    medMargin: median(rows.map(r => r.margin)),
+    medDTE: median(rows.map(r => r.dte)),
+    medROE: median(rows.map(r => r.roe)),
   };
 }
 
@@ -719,14 +806,15 @@ function genInsights(ticker,m,scores) {
     if(avg>10) add('positive','📈',`${ticker} shows strong average revenue growth of ${avg.toFixed(1)}% per year.`,`يُظهر ${ticker} نمواً قوياً في الإيرادات بمتوسط ${avg.toFixed(1)}٪ سنوياً.`);
     else if(avg<0) add('warning','📉',`Revenue declining at ${Math.abs(avg).toFixed(1)}% annually — monitor market positioning.`,`تراجع الإيرادات بمعدل ${Math.abs(avg).toFixed(1)}٪ سنوياً — راقب التموضع السوقي.`);
     else add('neutral','➡️',`Moderate growth of ${avg.toFixed(1)}% — stable but may benefit from acceleration.`,`نمو معتدل ${avg.toFixed(1)}٪ — مستقر لكن يحتاج تسريعاً.`);
-    // Sector context for growth
-    if(bench?.avgGrowth!=null){
-      const diff = avg - bench.avgGrowth;
+    // Sector context for growth — latest year vs sector median of latest years
+    if(bench?.medGrowth!=null){
+      const latest = revG[revG.length - 1];
+      const diff = latest - bench.medGrowth;
       if(Math.abs(diff) > 3){
         const above = diff > 0;
         add(above?'positive':'warning', above?'🏆':'🔻',
-          `Revenue growth is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} sector average of ${bench.avgGrowth.toFixed(1)}%.`,
-          `نمو الإيرادات ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من متوسط قطاع ${bench.sector} البالغ ${bench.avgGrowth.toFixed(1)}٪.`);
+          `Latest revenue growth is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} sector median of ${bench.medGrowth.toFixed(1)}%.`,
+          `نمو الإيرادات الأخير ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من وسيط قطاع ${bench.sector} البالغ ${bench.medGrowth.toFixed(1)}٪.`);
       }
     }
   }
@@ -739,13 +827,14 @@ function genInsights(ticker,m,scores) {
     else if(avg<0) add('danger','🚨',`Net losses (${avg.toFixed(1)}% margin) — cash sustainability is critical.`,`خسائر صافية (هامش ${avg.toFixed(1)}٪) — استدامة النقد أمر بالغ الأهمية.`);
     else if(avg<5) add('warning','⚠️',`Thin net margins at ${avg.toFixed(1)}% — pricing or cost pressure likely.`,`هوامش رفيعة ${avg.toFixed(1)}٪ — ضغط تسعيري أو تكاليف مرتفعة.`);
     // Sector context for margins
-    if(bench?.avgMargin!=null){
-      const diff = avg - bench.avgMargin;
+    if(bench?.medMargin!=null){
+      const latest = margins[margins.length - 1];
+      const diff = latest - bench.medMargin;
       if(Math.abs(diff) > 4){
         const above = diff > 0;
         add(above?'positive':'warning', above?'💎':'📉',
-          `Net margin is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} average of ${bench.avgMargin.toFixed(1)}%.`,
-          `الهامش الصافي ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من متوسط ${bench.sector} البالغ ${bench.avgMargin.toFixed(1)}٪.`);
+          `Latest net margin is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} sector median of ${bench.medMargin.toFixed(1)}%.`,
+          `الهامش الصافي الأخير ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من وسيط ${bench.sector} البالغ ${bench.medMargin.toFixed(1)}٪.`);
       }
     }
   }
@@ -757,13 +846,14 @@ function genInsights(ticker,m,scores) {
     if(avg>3) add('danger','⚠️',`High leverage — D/E of ${avg.toFixed(1)}x signals elevated financial risk.`,`رافعة مالية عالية — نسبة دين ${avg.toFixed(1)}x تشير إلى مخاطر مرتفعة.`);
     else if(avg<0.5) add('positive','🏦',`Conservative balance sheet — low D/E of ${avg.toFixed(1)}x provides flexibility.`,`ميزانية محافظة — نسبة دين منخفضة ${avg.toFixed(1)}x توفر مرونة.`);
     // Sector context for leverage
-    if(bench?.avgDTE!=null){
-      const diff = avg - bench.avgDTE;
+    if(bench?.medDTE!=null){
+      const latest = dtes[dtes.length - 1];
+      const diff = latest - bench.medDTE;
       if(Math.abs(diff) > 0.5){
         const higher = diff > 0;
         add(higher?'warning':'positive', higher?'📊':'🛡️',
-          `D/E ratio of ${avg.toFixed(2)}x is ${Math.abs(diff).toFixed(2)}x ${higher?'higher':'lower'} than the ${bench.sector} average of ${bench.avgDTE.toFixed(2)}x.`,
-          `نسبة الدين ${avg.toFixed(2)}x ${higher?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(2)}x من متوسط ${bench.sector} البالغ ${bench.avgDTE.toFixed(2)}x.`);
+          `Latest D/E of ${latest.toFixed(2)}x is ${Math.abs(diff).toFixed(2)}x ${higher?'higher':'lower'} than the ${bench.sector} sector median of ${bench.medDTE.toFixed(2)}x.`,
+          `نسبة الدين الأخيرة ${latest.toFixed(2)}x ${higher?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(2)}x من وسيط ${bench.sector} البالغ ${bench.medDTE.toFixed(2)}x.`);
       }
     }
   }
@@ -782,28 +872,28 @@ function genInsights(ticker,m,scores) {
     add('positive','🟢',`Positive free cash flow — able to fund growth or return capital.`,`تدفق نقدي حر إيجابي — قادر على تمويل النمو أو إعادة رأس المال.`);
 
   // ROE sector context
-  if(bench?.avgROE!=null){
+  if(bench?.medROE!=null){
     const roes = m.prof.map(p=>p.roe).filter(v=>v!=null);
     if(roes.length){
-      const avgROE = roes.reduce((a,b)=>a+b,0)/roes.length;
-      const diff = avgROE - bench.avgROE;
+      const latestROE = roes[roes.length - 1];
+      const diff = latestROE - bench.medROE;
       if(Math.abs(diff) > 5){
         const above = diff > 0;
         add(above?'positive':'warning', above?'⚡':'📉',
-          `ROE of ${avgROE.toFixed(1)}% is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} average of ${bench.avgROE.toFixed(1)}%.`,
-          `العائد على الملكية ${avgROE.toFixed(1)}٪ ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من متوسط ${bench.sector} البالغ ${bench.avgROE.toFixed(1)}٪.`);
+          `Latest ROE of ${latestROE.toFixed(1)}% is ${Math.abs(diff).toFixed(1)}pp ${above?'above':'below'} the ${bench.sector} sector median of ${bench.medROE.toFixed(1)}%.`,
+          `العائد على الملكية الأخير ${latestROE.toFixed(1)}٪ ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من وسيط ${bench.sector} البالغ ${bench.medROE.toFixed(1)}٪.`);
       }
     }
   }
 
   // Overall score sector context
-  if(bench?.avgOverall!=null){
-    const diff = scores.overall - bench.avgOverall;
+  if(bench?.medOverall!=null){
+    const diff = scores.overall - bench.medOverall;
     if(Math.abs(diff) > 1){
       const above = diff > 0;
       add(above?'positive':'warning', above?'🏅':'📋',
-        `Overall score ${scores.overall}/10 is ${Math.abs(diff).toFixed(1)} points ${above?'above':'below'} the ${bench.sector} sector average of ${bench.avgOverall.toFixed(1)}/10.`,
-        `الدرجة الإجمالية ${scores.overall}/10 ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من متوسط قطاع ${bench.sector} البالغ ${bench.avgOverall.toFixed(1)}/10.`);
+        `Overall score ${scores.overall}/10 is ${Math.abs(diff).toFixed(1)} points ${above?'above':'below'} the ${bench.sector} sector median of ${bench.medOverall.toFixed(1)}/10.`,
+        `الدرجة الإجمالية ${scores.overall}/10 ${above?'أعلى':'أقل'} بـ ${Math.abs(diff).toFixed(1)} نقطة من وسيط قطاع ${bench.sector} البالغ ${bench.medOverall.toFixed(1)}/10.`);
     }
   }
 
@@ -1425,7 +1515,7 @@ async function agentChat(ticker) {
   const bench = getSectorBenchmarks(ticker);
   let sectorCtx = '';
   if (bench) {
-    sectorCtx = `\nSector benchmarks (${bench.sector}, ${bench.count} companies): Avg score ${bench.avgOverall?.toFixed(1)}, Avg growth ${bench.avgGrowth?.toFixed(1)}%, Avg margin ${bench.avgMargin?.toFixed(1)}%, Avg D/E ${bench.avgDTE?.toFixed(2)}x.`;
+    sectorCtx = `\nSector benchmarks (${bench.sector}, ${bench.count} companies, MEDIANS of each company's latest year — not means): Median score ${bench.medOverall?.toFixed(1)}, Median revenue growth ${bench.medGrowth?.toFixed(1)}%, Median net margin ${bench.medMargin?.toFixed(1)}%, Median D/E ${bench.medDTE?.toFixed(2)}x.`;
   }
 
   const sysP = lang === 'ar'
@@ -1813,7 +1903,7 @@ const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'get_sector_overview',
-      description: 'Get overview of a sector: stock count, total market cap, avg score, top members.',
+      description: 'Get overview of a sector: stock count, total market cap, median overall score (not the mean), top members.',
       parameters: {
         type: 'object',
         properties: { sector: { type: 'string', description: 'Sector name (e.g., "Technology", "Energy")' } },
@@ -2006,9 +2096,11 @@ function tool_getSectorOverview({ sector }) {
   if (!members.length) return { error: `No stocks found in sector "${sector}"` };
   const totalMcap = members.reduce((s, t) => s + (STOCK[t]?.marketCap || 0), 0);
   const scored = members.map(t => ({ t, score: calcScores(calcMetrics(ANNUAL[t])).overall, mcap: STOCK[t]?.marketCap || 0 })).sort((a,b) => b.mcap - a.mcap);
-  const avgScore = (scored.reduce((s, x) => s + x.score, 0) / scored.length).toFixed(1);
+  const medScore = median(scored.map(x => x.score));
+  const medScoreTxt = medScore == null ? null : medScore.toFixed(1);
   return {
-    sector, count: members.length, total_market_cap: fM(totalMcap), avg_score: avgScore,
+    sector, count: members.length, total_market_cap: fM(totalMcap),
+    median_score: medScoreTxt, avg_score: medScoreTxt, score_stat: 'median',
     top_15_by_mcap: scored.slice(0, 15).map(x => ({ ticker: x.t, mcap: fM(x.mcap), score: x.score }))
   };
 }
@@ -3181,7 +3273,7 @@ const SPY_TICKER = 'SPY';
 async function saveToJournal({ ticker, direction = 'long', rationale = '', source = 'manual', source_query = '', confidence = null }) {
   if (!isAiReady()) { addChatMessage?.('agent', '🔒 Sign in to save picks to your journal.'); return null; }
   if (!ticker) { console.error('saveToJournal: ticker required'); return null; }
-  if (!supabaseClient) { console.error('Supabase not initialized'); return null; }
+  if (!getSupabase()) { console.error('Supabase not initialized'); return null; }
 
   const t = ticker.toUpperCase();
 
@@ -3225,7 +3317,7 @@ async function saveToJournal({ ticker, direction = 'long', rationale = '', sourc
 
 // Console helper: load all of user's journal entries
 async function loadJournal() {
-  if (!isAiReady() || !supabaseClient) return [];
+  if (!isAiReady() || !getSupabase()) return [];
   const { data, error } = await supabaseClient
     .from('decision_journal')
     .select('*')
@@ -3282,7 +3374,7 @@ async function computeAllJournalPerf(entries) {
 
 // Mark an entry as closed at current price
 async function closeJournalEntry(id) {
-  if (!isAiReady() || !supabaseClient) return false;
+  if (!isAiReady() || !getSupabase()) return false;
   const entries = await loadJournal();
   const entry = entries.find(e => e.id === id);
   if (!entry) return false;
@@ -3298,7 +3390,7 @@ async function closeJournalEntry(id) {
 }
 
 async function deleteJournalEntry(id) {
-  if (!isAiReady() || !supabaseClient) return false;
+  if (!isAiReady() || !getSupabase()) return false;
   const { error } = await supabaseClient
     .from('decision_journal')
     .delete()
@@ -3312,7 +3404,7 @@ async function deleteJournalEntry(id) {
 // Refresh the count badge in the sidebar "My Picks" label
 async function updateJournalBadge() {
   const badge = document.getElementById('journalCountBadge');
-  if (!badge || !isAiReady()) return;
+  if (!badge || !isAiReady() || !getSupabase()) return;
   try {
     const { count } = await supabaseClient
       .from('decision_journal')
@@ -4536,10 +4628,10 @@ function chatScreener(text) {
     // Sort by overall score
   } else if (lower.match(/sector|قطاع|strongest|weakest|أقوى|أضعف/)) {
     const sectorCounts = {};
-    TICKERS.forEach(t => { const s = STOCK[t]?.sector; if (s) { if (!sectorCounts[s]) sectorCounts[s] = { count: 0, totalScore: 0 }; sectorCounts[s].count++; const scores = calcScores(calcMetrics(ANNUAL[t])); sectorCounts[s].totalScore += scores.overall; } });
-    const sorted = Object.entries(sectorCounts).map(([s, d]) => ({ sector: s, count: d.count, avg: (d.totalScore / d.count).toFixed(1) })).sort((a, b) => b.avg - a.avg);
+    TICKERS.forEach(t => { const s = STOCK[t]?.sector; if (s && ANNUAL[t]?.length) { if (!sectorCounts[s]) sectorCounts[s] = { count: 0, scores: [] }; sectorCounts[s].count++; sectorCounts[s].scores.push(calcScores(calcMetrics(ANNUAL[t])).overall); } });
+    const sorted = Object.entries(sectorCounts).map(([s, d]) => ({ sector: s, count: d.count, avg: (median(d.scores) ?? 0).toFixed(1) })).sort((a, b) => b.avg - a.avg);
     let html = `<div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--text3);margin-bottom:8px">${isAr?'📊 تحليل القطاعات':'📊 SECTOR ANALYSIS'}</div>`;
-    html += `<table class="agent-peer-tbl"><thead><tr><th>${isAr?'القطاع':'Sector'}</th><th>${isAr?'الشركات':'Companies'}</th><th>${isAr?'متوسط الدرجة':'Avg Score'}</th></tr></thead><tbody>`;
+    html += `<table class="agent-peer-tbl"><thead><tr><th>${isAr?'القطاع':'Sector'}</th><th>${isAr?'الشركات':'Companies'}</th><th>${isAr?'وسيط الدرجة':'Median Score'}</th></tr></thead><tbody>`;
     sorted.forEach(s => { html += `<tr><td>${s.sector}</td><td>${s.count}</td><td style="font-weight:700;color:${sCol(parseFloat(s.avg))}">${s.avg}/10</td></tr>`; });
     html += '</tbody></table>';
     addChatMessage('agent', html);
@@ -4591,14 +4683,14 @@ function buildUniverseDigest() {
   const sectorMap = {};
   withScores.forEach(x => {
     const sec = x.stk.sector || 'Other';
-    if (!sectorMap[sec]) sectorMap[sec] = { count: 0, totalScore: 0, totalMcap: 0, tickers: [] };
+    if (!sectorMap[sec]) sectorMap[sec] = { count: 0, scores: [], totalMcap: 0, tickers: [] };
     sectorMap[sec].count++;
-    sectorMap[sec].totalScore += x.s.overall;
+    sectorMap[sec].scores.push(x.s.overall);
     sectorMap[sec].totalMcap += x.stk.marketCap || 0;
     sectorMap[sec].tickers.push(x.t);
   });
   const sectors = Object.entries(sectorMap).map(([sec, d]) => ({
-    sector: sec, count: d.count, avgScore: (d.totalScore / d.count).toFixed(1), mcap: d.totalMcap
+    sector: sec, count: d.count, medScore: (median(d.scores) ?? 0).toFixed(1), mcap: d.totalMcap
   })).sort((a,b) => b.mcap - a.mcap);
 
   // Format as compact text for AI
@@ -4614,7 +4706,7 @@ TOP 10 BY REVENUE:
 ${topRev.map((x,i) => `${i+1}. ${x.t}: ${fM(x.lat.revenue)}`).join('\n')}
 
 SECTORS (by total market cap):
-${sectors.map(s => `${s.sector}: ${s.count} stocks, ${fM(s.mcap)} mcap, avg score ${s.avgScore}/10`).join('\n')}`;
+${sectors.map(s => `${s.sector}: ${s.count} stocks, ${fM(s.mcap)} mcap, median score ${s.medScore}/10`).join('\n')}`;
 
   _universeDigestCache = digest;
   _universeDigestTime = Date.now();
@@ -5202,18 +5294,15 @@ function renderIndustryDashboard(industry, sector) {
       companies[t] = { m, scores: calcScores(m), stk: STOCK[t] || {} };
     });
 
-    const avgOf = (key) => {
-      const vals = tickers.map(t => companies[t].scores[key]).filter(v => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-    };
+    const medOf = (key) => median(tickers.map(t => companies[t].scores[key]));
     const sorted = [...tickers].sort((a, b) => (companies[b].scores.overall || 0) - (companies[a].scores.overall || 0));
 
     const statsHtml = [
       { lbl: isAr ? 'الشركات' : 'Companies', val: tickers.length },
-      { lbl: isAr ? 'الدرجة' : 'Avg Score', val: avgOf('overall')?.toFixed(1) || '—', color: sCol(avgOf('overall') || 5) },
-      { lbl: isAr ? 'النمو' : 'Growth', val: avgOf('growth')?.toFixed(1) || '—', color: sCol(avgOf('growth') || 5) },
-      { lbl: isAr ? 'الربحية' : 'Profit', val: avgOf('profitability')?.toFixed(1) || '—', color: sCol(avgOf('profitability') || 5) },
-      { lbl: isAr ? 'الصحة' : 'Health', val: avgOf('health')?.toFixed(1) || '—', color: sCol(avgOf('health') || 5) },
+      { lbl: isAr ? 'وسيط الدرجة' : 'Median Score', val: medOf('overall')?.toFixed(1) || '—', color: sCol(medOf('overall') || 5) },
+      { lbl: isAr ? 'النمو' : 'Growth', val: medOf('growth')?.toFixed(1) || '—', color: sCol(medOf('growth') || 5) },
+      { lbl: isAr ? 'الربحية' : 'Profit', val: medOf('profitability')?.toFixed(1) || '—', color: sCol(medOf('profitability') || 5) },
+      { lbl: isAr ? 'الصحة' : 'Health', val: medOf('health')?.toFixed(1) || '—', color: sCol(medOf('health') || 5) },
     ].map(s => `<div class="sec-stat"><div class="sec-stat-lbl">${s.lbl}</div><div class="sec-stat-val" ${s.color?`style="color:${s.color}"`:''} >${s.val}</div></div>`).join('');
 
     const rowsHtml = sorted.map((t, i) => {
@@ -5348,9 +5437,9 @@ function showWatchlistDashboard() {
     if (!tickers.length) return;
 
     // Summary stats
-    const avgScore = tickers.reduce((s, t) => s + (data[t].scores.overall || 0), 0) / tickers.length;
-    const avgGrowth = (() => { const v = tickers.flatMap(t => data[t].m.yoy.map(y => y.revenue_growth)).filter(v => v != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; })();
-    const avgMargin = (() => { const v = tickers.flatMap(t => data[t].m.prof.map(p => p.net_margin)).filter(v => v != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; })();
+    const avgScore = median(tickers.map(t => data[t].scores.overall));
+    const avgGrowth = median(tickers.map(t => latestMetric(data[t].m.yoy, 'revenue_growth')));
+    const avgMargin = median(tickers.map(t => latestMetric(data[t].m.prof, 'net_margin')));
     const totalMcap = tickers.reduce((s, t) => s + (data[t].stk.marketCap || 0), 0);
 
     // Sector concentration
@@ -5429,10 +5518,10 @@ function showWatchlistDashboard() {
       </div>
 
       <div class="wl-summary-grid">
-        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'متوسط الدرجة' : 'Avg Score'}</div><div class="wl-sum-val" style="color:${sCol(avgScore)}">${avgScore.toFixed(1)}</div><div class="wl-sum-sub">/10</div></div>
+        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'وسيط الدرجة' : 'Median Score'}</div><div class="wl-sum-val" style="color:${sCol(avgScore)}">${avgScore != null ? avgScore.toFixed(1) : '—'}</div><div class="wl-sum-sub">/10</div></div>
         <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'التنويع' : 'Diversification'}</div><div class="wl-sum-val" style="color:${sCol(parseFloat(diversificationScore))}">${diversificationScore}</div><div class="wl-sum-sub">/10</div></div>
-        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'متوسط النمو' : 'Avg Growth'}</div><div class="wl-sum-val" style="color:${avgGrowth > 0 ? 'var(--green)' : 'var(--red)'}">${avgGrowth != null ? (avgGrowth > 0 ? '+' : '') + avgGrowth.toFixed(1) + '%' : '—'}</div></div>
-        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'متوسط الهامش' : 'Avg Margin'}</div><div class="wl-sum-val" style="color:${avgMargin > 10 ? 'var(--green)' : avgMargin > 0 ? 'var(--accent)' : 'var(--red)'}">${avgMargin != null ? avgMargin.toFixed(1) + '%' : '—'}</div></div>
+        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'وسيط النمو' : 'Median Growth'}</div><div class="wl-sum-val" style="color:${avgGrowth > 0 ? 'var(--green)' : 'var(--red)'}">${avgGrowth != null ? (avgGrowth > 0 ? '+' : '') + avgGrowth.toFixed(1) + '%' : '—'}</div></div>
+        <div class="wl-sum-card"><div class="wl-sum-lbl">${isAr ? 'وسيط الهامش' : 'Median Margin'}</div><div class="wl-sum-val" style="color:${avgMargin > 10 ? 'var(--green)' : avgMargin > 0 ? 'var(--accent)' : 'var(--red)'}">${avgMargin != null ? avgMargin.toFixed(1) + '%' : '—'}</div></div>
       </div>
 
       <div class="sec-hdr"><div class="sec-title">${isAr ? '📊 توزيع القطاعات' : '📊 Sector Allocation'}</div></div>
@@ -5534,7 +5623,7 @@ function renderSectorComposition() {
       if (!rows?.length) return null;
       return calcScores(calcMetrics(rows)).overall;
     }).filter(v => v != null);
-    const avgScore = scores.length ? (scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+    const avgScore = median(scores);
 
     return `<div class="tm-cell" onclick="selectSector('${sec}')" style="background:${col}22;border:1px solid ${col}44;flex-basis:${width}px;flex-grow:${Math.max(1, Math.round(pct / 5))}">
       <div class="tm-cell-name" style="color:${col}">${sec}</div>
@@ -5657,9 +5746,9 @@ function _sectorScoreStats(sec) {
   const rows = members.map(t => ({ t, ...calcScores(calcMetrics(ANNUAL[t])) }));
   const byOverall = [...rows].sort((a, b) => (b.overall || 0) - (a.overall || 0));
   const rankOf = {}; byOverall.forEach((r, i) => { rankOf[r.t] = i + 1; });
-  const avg = k => rows.reduce((a, r) => a + (r[k] || 0), 0) / rows.length;
+  const med = k => median(rows.map(r => r[k]));
   _sectorScoreCache[sec] = { count: members.length, rankOf,
-    avg: { growth: avg('growth'), profitability: avg('profitability'), health: avg('health'), cashflow: avg('cashflow'), overall: avg('overall') } };
+    med: { growth: med('growth'), profitability: med('profitability'), health: med('health'), cashflow: med('cashflow'), overall: med('overall') } };
   return _sectorScoreCache[sec];
 }
 
@@ -5678,10 +5767,10 @@ function renderSectorContext(ticker, scores) {
 
   const cats = [['overall', L('Overall', 'الإجمالي')], ['growth', L('Growth', 'النمو')], ['profitability', L('Profit', 'الربحية')], ['health', L('Health', 'الصحة')], ['cashflow', L('Cash', 'التدفق')]];
   const chips = cats.map(([k, lbl]) => {
-    const v = scores[k], a = st.avg[k], d = v - a;
+    const v = scores[k], a = st.med[k], d = (a == null) ? 0 : v - a;
     const cls = d >= 0.3 ? 'up' : d <= -0.3 ? 'down' : 'flat';
     const arrow = d >= 0.3 ? '▲' : d <= -0.3 ? '▼' : '≈';
-    return `<div class="sctx-chip ${cls}"><span class="sctx-k">${lbl}</span><span class="sctx-v">${v.toFixed(1)} <span class="sctx-arrow">${arrow}</span></span><span class="sctx-avg">${L('avg', 'متوسط')} ${a.toFixed(1)}</span></div>`;
+    return `<div class="sctx-chip ${cls}"><span class="sctx-k">${lbl}</span><span class="sctx-v">${v.toFixed(1)} <span class="sctx-arrow">${arrow}</span></span><span class="sctx-avg">${L('median', 'وسيط')} ${a == null ? '—' : a.toFixed(1)}</span></div>`;
   }).join('');
 
   const valStat = (pe && pe.pct != null) ? `<div class="sctx-stat">
@@ -5981,6 +6070,194 @@ function renderCompanyProfile(ticker) {
   </div>`;
 }
 
+function dayChangeInner(change, changePct) {
+  const c = coerceNum(change);
+  const p = coerceNum(changePct);
+  const isAr = lang === 'ar';
+  if (c == null && p == null) {
+    const tip = isAr ? 'التغير اليومي غير متاح حالياً' : 'Daily change is not available right now';
+    const label = isAr ? 'التغير غير متاح' : 'Change n/a';
+    return `<span class="sb-change na" id="liveChange" title="${tip}">${label}</span>`;
+  }
+  const up = (c != null ? c : p) >= 0;
+  let text = '';
+  if (c != null && p != null) text = `${up ? '+' : ''}${c.toFixed(2)} (${up ? '+' : ''}${p.toFixed(2)}%)`;
+  else if (p != null) text = `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
+  else text = `${c >= 0 ? '+' : ''}${c.toFixed(2)}`;
+  const cls = (c != null ? c : p) > 0 ? 'up' : (c != null ? c : p) < 0 ? 'down' : 'na';
+  return `<span class="sb-change ${cls}" id="liveChange">${text}</span>`;
+}
+function dayChangeHtml(stk) {
+  return `<div class="sb-item" id="liveChangeWrap">${dayChangeInner(stk?.change, stk?.changePct)}</div><div class="sb-divider"></div>`;
+}
+
+// ── FINANCIAL STATEMENTS (annual + quarterly, from data already stored) ─────
+let _stmtPref = { kind: 'income', period: 'annual' };
+
+function setStatementView(kind, period) {
+  if (kind) _stmtPref.kind = kind;
+  if (period) _stmtPref.period = period;
+  const host = document.getElementById('stmtBody');
+  if (host && currentDash) {
+    host.innerHTML = renderStatementBody(currentDash.rows, QUARTERLY[currentDash.ticker] || []);
+  }
+  document.querySelectorAll('[data-stmt-kind]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.stmtKind === _stmtPref.kind);
+  });
+  document.querySelectorAll('[data-stmt-period]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.stmtPeriod === _stmtPref.period);
+  });
+}
+
+function statementLines(kind) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  if (kind === 'balance') return [
+    { section: L('Assets', 'الأصول') },
+    { key: 'cash', label: L('Cash and equivalents', 'النقد وما يعادله') },
+    { key: 'receivables', label: L('Receivables', 'الذمم المدينة') },
+    { key: 'inventory', label: L('Inventory', 'المخزون') },
+    { key: 'current_assets', label: L('Total current assets', 'إجمالي الأصول المتداولة'), total: true },
+    { key: 'net_ppe', label: L('Net property and equipment', 'صافي الممتلكات والمعدات') },
+    { key: 'total_assets', label: L('Total assets', 'إجمالي الأصول'), total: true },
+    { section: L('Liabilities and equity', 'الالتزامات وحقوق الملكية') },
+    { key: 'current_liabilities', label: L('Total current liabilities', 'إجمالي الالتزامات المتداولة') },
+    { key: 'long_term_debt', label: L('Long-term debt', 'الديون طويلة الأجل') },
+    { key: 'total_debt', label: L('Total debt', 'إجمالي الديون'), total: true },
+    { key: 'total_liabilities', label: L('Total liabilities', 'إجمالي الالتزامات'), total: true },
+    { key: 'retained_earnings', label: L('Retained earnings', 'الأرباح المبقاة') },
+    { key: 'equity', label: L('Stockholders equity', 'حقوق المساهمين'), total: true },
+  ];
+  if (kind === 'cash') return [
+    { section: L('Cash flow statement', 'قائمة التدفق النقدي') },
+    { key: 'operating_cash_flow', label: L('Operating cash flow', 'التدفق التشغيلي'), total: true },
+    { key: 'depreciation', label: L('Depreciation and amortization', 'الإهلاك والإطفاء') },
+    { key: 'stock_based_comp', label: L('Stock-based compensation', 'تعويضات الأسهم') },
+    { key: 'capital_expenditures', label: L('Capital expenditures', 'النفقات الرأسمالية') },
+    { key: 'investing_cash_flow', label: L('Investing cash flow', 'التدفق الاستثماري') },
+    { key: 'free_cash_flow', label: L('Free cash flow', 'التدفق الحر'), total: true },
+    { key: 'dividends_paid', label: L('Dividends paid', 'توزيعات مدفوعة') },
+    { key: 'share_repurchase', label: L('Share repurchases', 'إعادة شراء الأسهم') },
+    { key: 'financing_cash_flow', label: L('Financing cash flow', 'التدفق التمويلي') },
+  ];
+  return [
+    { section: L('Income statement', 'قائمة الدخل') },
+    { key: 'revenue', label: L('Revenue', 'الإيرادات'), total: true },
+    { key: 'cost_of_revenue', label: L('Cost of revenue', 'تكلفة الإيرادات') },
+    { key: 'gross_profit', label: L('Gross profit', 'مجمل الربح'), total: true },
+    { key: 'research_and_development', label: L('Research and development', 'البحث والتطوير') },
+    { key: 'sga', label: L('Selling, general and administrative', 'المصروفات العمومية والإدارية') },
+    { key: 'operating_income', label: L('Operating income', 'الدخل التشغيلي'), total: true },
+    { key: 'ebitda', label: 'EBITDA' },
+    { key: 'ebit', label: 'EBIT' },
+    { key: 'interest_expense', label: L('Interest expense', 'مصروف الفائدة') },
+    { key: 'tax_provision', label: L('Income tax', 'ضريبة الدخل') },
+    { key: 'net_income', label: L('Net income', 'صافي الدخل'), total: true },
+    { key: 'eps_diluted', label: L('EPS (diluted)', 'ربحية السهم المخففة'), fmt: 'eps' },
+    { key: 'shares_diluted', label: L('Diluted shares', 'الأسهم المخففة'), fmt: 'shares' },
+  ];
+}
+
+function fmtStmt(v, fmt) {
+  const n = coerceNum(v);
+  if (n == null) return '—';
+  if (fmt === 'eps') {
+    const s = '$' + Math.abs(n).toFixed(2);
+    return n < 0 ? '(' + s + ')' : s;
+  }
+  if (fmt === 'shares') {
+    const a = Math.abs(n);
+    const s = a >= 1e9 ? (a / 1e9).toFixed(2) + 'B' : a >= 1e6 ? (a / 1e6).toFixed(2) + 'M' : a.toLocaleString();
+    return n < 0 ? '(' + s + ')' : s;
+  }
+  return fM(n);
+}
+
+function renderStatementBody(annualRows, qRows) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const kind = _stmtPref.kind;
+  const period = _stmtPref.period;
+  const cols = period === 'quarter'
+    ? [...(qRows || [])].sort((a, b) => String(b.date).localeCompare(String(a.date))).map(q => ({
+        label: q.period ? `${q.period} · ${String(q.date).slice(0, 7)}` : String(q.date || '').slice(0, 10),
+        data: q,
+      }))
+    : [...(annualRows || [])].sort((a, b) => b.year - a.year).map(r => ({ label: String(r.year), data: r }));
+
+  if (!cols.length) {
+    return `<div class="news-state"><div class="news-state-title">${period === 'quarter'
+      ? L('No quarterly statements stored for this company.', 'لا توجد قوائم فصلية مخزّنة لهذه الشركة.')
+      : L('No annual statements stored for this company.', 'لا توجد قوائم سنوية مخزّنة لهذه الشركة.')}</div></div>`;
+  }
+
+  const lines = statementLines(kind);
+  const visible = [];
+  let pendingSection = null;
+  for (const line of lines) {
+    if (line.section) { pendingSection = line; continue; }
+    const any = cols.some(c => coerceNum(c.data[line.key]) != null);
+    if (!any) continue;
+    if (pendingSection) { visible.push(pendingSection); pendingSection = null; }
+    visible.push(line);
+  }
+
+  if (!visible.length) {
+    const msg = (kind === 'balance' && period === 'quarter')
+      ? L('Quarterly balance sheet is not in the stored data. Switch to Annual for the full balance sheet.', 'الميزانية الفصلية غير مخزّنة. انتقل إلى سنوي لعرض الميزانية الكاملة.')
+      : (kind === 'cash' && period === 'quarter')
+        ? L('Only operating cash flow and free cash flow are stored quarterly, and both are missing here. The annual cash flow statement is complete.', 'فصليًا يُخزَّن التدفق التشغيلي والتدفق الحر فقط، وكلاهما غير متوفر هنا. القائمة السنوية مكتملة.')
+        : L('These lines are not in the stored data for this period.', 'هذه البنود غير موجودة في البيانات المخزّنة لهذه الفترة.');
+    return `<div class="news-state"><div class="news-state-title">${msg}</div></div>`;
+  }
+
+  const head = cols.map(c => `<th style="text-align:right">${escHtml(c.label)}</th>`).join('');
+  const body = visible.map(line => {
+    if (line.section) {
+      return `<tr class="stmt-section"><td colspan="${cols.length + 1}">${escHtml(line.section)}</td></tr>`;
+    }
+    const signed = ['net_income', 'operating_income', 'gross_profit', 'operating_cash_flow', 'free_cash_flow', 'eps_diluted'].includes(line.key);
+    const cells = cols.map(c => `<td class="${signed ? pc(coerceNum(c.data[line.key])) : ''}">${fmtStmt(c.data[line.key], line.fmt)}</td>`).join('');
+    return `<tr class="${line.total ? 'stmt-total' : ''}"><td>${escHtml(line.label)}</td>${cells}</tr>`;
+  }).join('');
+
+  const note = period === 'quarter'
+    ? L('Quarterly view uses the lines that are stored (income statement plus operating and free cash flow). The annual view has the full three statements.', 'العرض الفصلي يستخدم البنود المخزّنة (قائمة الدخل إضافة إلى التدفق التشغيلي والحر). العرض السنوي يتضمن القوائم الثلاث كاملة.')
+    : L('Annual figures from the statements already stored for this company. A dash means that line was not reported.', 'أرقام سنوية من القوائم المخزّنة لهذه الشركة. الشرطة تعني أن البند غير مُبلَّغ.');
+
+  return `<div class="tbl-card"><div class="tbl-scroll"><table class="stmt-table">
+    <thead><tr><th>${L('Line', 'البند')}</th>${head}</tr></thead>
+    <tbody>${body}</tbody>
+  </table></div></div>
+  <div class="stmt-note">${note}</div>`;
+}
+
+function renderFinancialStatements(annualRows, qRows) {
+  const isAr = lang === 'ar';
+  const L = (en, ar) => isAr ? ar : en;
+  const tab = (attr, value, label) => {
+    const on = (attr === 'kind' ? _stmtPref.kind : _stmtPref.period) === value;
+    const arg = attr === 'kind' ? `'${value}', null` : `null, '${value}'`;
+    const data = attr === 'kind' ? `data-stmt-kind="${value}"` : `data-stmt-period="${value}"`;
+    return `<button type="button" class="stmt-tab${on ? ' active' : ''}" ${data} onclick="setStatementView(${arg})">${label}</button>`;
+  };
+  return `<div class="tbl-sec" id="statements">
+    <div class="sec-hdr">
+      <div class="sec-title">📑 ${L('Financial Statements', 'القوائم المالية')}</div>
+      <div class="stmt-tabs">
+        ${tab('period', 'annual', L('Annual', 'سنوي'))}
+        ${tab('period', 'quarter', L('Quarterly', 'فصلي'))}
+      </div>
+    </div>
+    <div class="stmt-tabs" style="margin-bottom:10px">
+      ${tab('kind', 'income', L('Income Statement', 'قائمة الدخل'))}
+      ${tab('kind', 'balance', L('Balance Sheet', 'الميزانية العمومية'))}
+      ${tab('kind', 'cash', L('Cash Flow', 'التدفق النقدي'))}
+    </div>
+    <div id="stmtBody">${renderStatementBody(annualRows, qRows)}</div>
+  </div>`;
+}
+
 function loadTickerIntoDash(ticker) {
   _dashTarget = document.getElementById('dashPanelContent');
   loadTicker(ticker);
@@ -6053,7 +6330,7 @@ function loadTicker(ticker) {
     const recCls = {buy:'rec-buy',hold:'rec-hold',sell:'rec-sell'}[stk.recommendation] || '';
     const stkHtml = (stk.price||stk.marketCap) ? `<div class="stock-bar" id="stockBar">
       ${stk.price?`<div class="sb-item"><span class="sb-lbl">${T('price')}</span><span class="sb-val" id="livePrice">$${stk.price.toFixed(2)}</span></div><div class="sb-divider"></div>`:'<div class="sb-item"><span class="sb-lbl">${T("price")}</span><span class="sb-val" id="livePrice">—</span></div><div class="sb-divider"></div>'}
-      <div class="sb-item" id="liveChangeWrap"><span class="sb-change" id="liveChange">—</span></div><div class="sb-divider"></div>
+      ${dayChangeHtml(stk)}
       ${stk.marketCap?`<div class="sb-item"><span class="sb-lbl">${T('mktCap')}</span><span class="sb-val" id="liveMcap">${fM(stk.marketCap)}</span></div><div class="sb-divider"></div>`:`<div class="sb-item"><span class="sb-lbl">${T('mktCap')}</span><span class="sb-val" id="liveMcap">—</span></div><div class="sb-divider"></div>`}
       ${stk.pe?`<div class="sb-item"><span class="sb-lbl">${T('pe')}</span><span class="sb-val" id="livePe">${stk.pe.toFixed(1)}x</span></div><div class="sb-divider"></div>`:`<div class="sb-item"><span class="sb-lbl">${T('pe')}</span><span class="sb-val" id="livePe">—</span></div><div class="sb-divider"></div>`}
       ${stk.currentRatio?`<div class="sb-item"><span class="sb-lbl">${T('currentRatio')}</span><span class="sb-val">${stk.currentRatio.toFixed(2)}</span></div><div class="sb-divider"></div>`:''}
@@ -6063,7 +6340,7 @@ function loadTicker(ticker) {
       <button class="sb-journal-btn" onclick="quickSaveCurrentTicker()" title="${lang==='ar'?'احفظ في السجل':'Save to Journal'}">📓 ${lang==='ar'?'احفظ':'Save'}</button>
     </div>` : `<div class="stock-bar" id="stockBar">
       <div class="sb-item"><span class="sb-lbl">${T('price')}</span><span class="sb-val" id="livePrice">—</span></div><div class="sb-divider"></div>
-      <div class="sb-item"><span class="sb-change" id="liveChange">—</span></div><div class="sb-divider"></div>
+      ${dayChangeHtml(stk)}
       <div class="sb-item"><span class="sb-lbl">${T('mktCap')}</span><span class="sb-val" id="liveMcap">—</span></div>
       <div class="sb-live hidden" id="liveTag"><div class="sb-live-dot"></div> LIVE</div>
       <button class="sb-journal-btn" onclick="quickSaveCurrentTicker()" title="${lang==='ar'?'احفظ في السجل':'Save to Journal'}">📓 ${lang==='ar'?'احفظ':'Save'}</button>
@@ -6186,6 +6463,7 @@ function loadTicker(ticker) {
       <div class="score-row">${scHtml}</div>
       ${sectorCtxHtml}
       <div class="kpi-grid">${kpiHtml}</div>
+      ${renderFinancialStatements(rows, qData)}
 
       <div class="ai-block" id="agentPanel">
         <div class="agent-hdr">
@@ -6254,7 +6532,7 @@ function loadTicker(ticker) {
 
       <div style="margin-bottom:18px">
         <div class="sec-hdr"><div class="sec-title">📰 ${lang==='ar' ? 'آخر الأخبار' : 'Latest News'}</div></div>
-        <div class="news-feed" id="newsFeed"><div class="news-loading">${lang==='ar'?'جار تحميل الأخبار...':'Loading news...'}</div></div>
+        <div class="news-feed" id="newsFeed"></div>
       </div>
 
       <div class="charts-2">
@@ -6288,29 +6566,11 @@ function loadTicker(ticker) {
 
     setTimeout(() => {
       drawCharts(ticker, rows, m);
-      // Fetch live data in background (non-blocking)
+      loadCompanyNews(ticker);
+      // Live quote and price history need the signed-in FMP proxy. Change stays
+      // on the explicit "n/a" label when the quote never arrives.
       if (isAiReady()) {
         fetchLiveQuote(ticker).then(q => updateStockBarWithLive(ticker, q));
-        fetchLiveNews(ticker).then(async news => {
-          if (!news?.length) { renderNewsSection(news); return; }
-          // 1) Render news IMMEDIATELY so it always shows, even if sentiment scoring
-          //    hangs or fails. (Sentiment shows as 'unknown' until scored.)
-          renderNewsSection(news);
-          // 2) Enhance with AI sentiment in the background — never let a failure
-          //    here block the news from displaying.
-          try {
-            const scored = await analyseNewsSentiment(news, ticker);
-            renderNewsSection(scored);
-            if (isAiReady() && agentMemory[ticker]) {
-              agentMemory[ticker].sentiment = scored.reduce((s, n) => s + (n.sentimentScore || 0), 0);
-            }
-          } catch (e) {
-            console.warn('News sentiment scoring failed (news still shown):', e);
-          }
-        }).catch(e => {
-          console.warn('News fetch failed:', e);
-          renderNewsSection([]);
-        });
         loadPriceChart(ticker, '1m');
       }
     }, 60);
@@ -6328,28 +6588,16 @@ function computeSectorData(sector) {
     companies[t] = { m, scores, stk: STOCK[t] || {}, rows: ANNUAL[t] };
   });
 
-  // Aggregate scores
-  const avgOf = (key) => {
-    const vals = tickers.map(t => companies[t].scores[key]).filter(v => v != null);
-    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-  };
+  // Medians: one latest-year observation per company, then the median.
+  const medOf = (key) => median(tickers.map(t => companies[t].scores[key]));
   const avgScores = {
-    growth: avgOf('growth'), profitability: avgOf('profitability'),
-    health: avgOf('health'), cashflow: avgOf('cashflow'), overall: avgOf('overall')
+    growth: medOf('growth'), profitability: medOf('profitability'),
+    health: medOf('health'), cashflow: medOf('cashflow'), overall: medOf('overall')
   };
-
-  // Aggregate metrics
-  const allProf = tickers.flatMap(t => companies[t].m.prof);
-  const allLev = tickers.flatMap(t => companies[t].m.lev);
-  const allYoy = tickers.flatMap(t => companies[t].m.yoy);
-  const avgMetric = (arr, key) => {
-    const vals = arr.map(r => r[key]).filter(v => v != null && !isNaN(v));
-    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-  };
-  const avgNetMargin = avgMetric(allProf, 'net_margin');
-  const avgROE = avgMetric(allProf, 'roe');
-  const avgDTE = avgMetric(allLev, 'dte');
-  const avgRevGrowth = avgMetric(allYoy, 'revenue_growth');
+  const avgNetMargin = median(tickers.map(t => latestMetric(companies[t].m.prof, 'net_margin')));
+  const avgROE = median(tickers.map(t => latestMetric(companies[t].m.prof, 'roe')));
+  const avgDTE = median(tickers.map(t => latestMetric(companies[t].m.lev, 'dte')));
+  const avgRevGrowth = median(tickers.map(t => latestMetric(companies[t].m.yoy, 'revenue_growth')));
 
   // Industry breakdown
   const industries = {};
@@ -6385,10 +6633,10 @@ function renderSectorDashboard(sector) {
     // Aggregate stats row
     const statsHtml = [
       { lbl: isAr ? 'الشركات' : 'Companies', val: d.tickers.length, sub: isAr ? 'في هذا القطاع' : 'in sector' },
-      { lbl: isAr ? 'الدرجة الإجمالية' : 'Avg Score', val: d.avgScores.overall?.toFixed(1) || '—', sub: '/10', color: sCol(d.avgScores.overall || 5) },
-      { lbl: isAr ? 'نمو الإيرادات' : 'Avg Rev Growth', val: d.avgRevGrowth != null ? (d.avgRevGrowth > 0 ? '+' : '') + d.avgRevGrowth.toFixed(1) + '%' : '—', sub: isAr ? 'سنوي' : 'annual', color: d.avgRevGrowth > 0 ? 'var(--green)' : 'var(--red)' },
-      { lbl: isAr ? 'هامش صافي' : 'Avg Net Margin', val: d.avgNetMargin != null ? d.avgNetMargin.toFixed(1) + '%' : '—', sub: isAr ? 'متوسط القطاع' : 'sector avg', color: d.avgNetMargin > 10 ? 'var(--green)' : d.avgNetMargin > 0 ? 'var(--accent)' : 'var(--red)' },
-      { lbl: isAr ? 'الدين/الملكية' : 'Avg D/E', val: d.avgDTE != null ? d.avgDTE.toFixed(2) + 'x' : '—', sub: isAr ? 'الرافعة المالية' : 'leverage', color: d.avgDTE < 1 ? 'var(--green)' : d.avgDTE < 2 ? 'var(--accent)' : 'var(--red)' },
+      { lbl: isAr ? 'وسيط الدرجة' : 'Median Score', val: d.avgScores.overall?.toFixed(1) || '—', sub: '/10', color: sCol(d.avgScores.overall || 5) },
+      { lbl: isAr ? 'وسيط نمو الإيرادات' : 'Median Rev Growth', val: d.avgRevGrowth != null ? (d.avgRevGrowth > 0 ? '+' : '') + d.avgRevGrowth.toFixed(1) + '%' : '—', sub: isAr ? 'وسيط القطاع' : 'sector median', color: d.avgRevGrowth > 0 ? 'var(--green)' : 'var(--red)' },
+      { lbl: isAr ? 'وسيط الهامش الصافي' : 'Median Net Margin', val: d.avgNetMargin != null ? d.avgNetMargin.toFixed(1) + '%' : '—', sub: isAr ? 'وسيط القطاع' : 'sector median', color: d.avgNetMargin > 10 ? 'var(--green)' : d.avgNetMargin > 0 ? 'var(--accent)' : 'var(--red)' },
+      { lbl: isAr ? 'وسيط الدين/الملكية' : 'Median D/E', val: d.avgDTE != null ? d.avgDTE.toFixed(2) + 'x' : '—', sub: isAr ? 'وسيط الرافعة' : 'sector median', color: d.avgDTE < 1 ? 'var(--green)' : d.avgDTE < 2 ? 'var(--accent)' : 'var(--red)' },
     ].map(s => `<div class="sec-stat">
       <div class="sec-stat-lbl">${s.lbl}</div>
       <div class="sec-stat-val" ${s.color ? `style="color:${s.color}"` : ''}>${s.val}</div>
@@ -6450,12 +6698,9 @@ function renderSectorDashboard(sector) {
 
     // Industry table
     const indTableHtml = indSorted.map(([ind, tks]) => {
-      const indScores = tks.map(t => d.companies[t].scores.overall).filter(v => v != null);
-      const indAvg = indScores.length ? (indScores.reduce((a, b) => a + b, 0) / indScores.length) : null;
-      const indMargins = tks.flatMap(t => d.companies[t].m.prof.map(p => p.net_margin)).filter(v => v != null);
-      const indAvgMargin = indMargins.length ? (indMargins.reduce((a, b) => a + b, 0) / indMargins.length) : null;
-      const indGrowths = tks.flatMap(t => d.companies[t].m.yoy.map(y => y.revenue_growth)).filter(v => v != null);
-      const indAvgGrowth = indGrowths.length ? (indGrowths.reduce((a, b) => a + b, 0) / indGrowths.length) : null;
+      const indAvg = median(tks.map(t => d.companies[t].scores.overall));
+      const indAvgMargin = median(tks.map(t => latestMetric(d.companies[t].m.prof, 'net_margin')));
+      const indAvgGrowth = median(tks.map(t => latestMetric(d.companies[t].m.yoy, 'revenue_growth')));
       const best = tks.reduce((a, b) => (d.companies[a]?.scores.overall || 0) >= (d.companies[b]?.scores.overall || 0) ? a : b);
       return `<tr>
         <td style="font-weight:600">${ind}</td>
@@ -6497,9 +6742,9 @@ function renderSectorDashboard(sector) {
           <thead><tr>
             <th>${isAr ? 'الصناعة' : 'Industry'}</th>
             <th style="text-align:center">#</th>
-            <th style="text-align:center">${isAr ? 'الدرجة' : 'Avg Score'}</th>
-            <th style="text-align:center">${isAr ? 'النمو' : 'Avg Growth'}</th>
-            <th style="text-align:center">${isAr ? 'الهامش' : 'Avg Margin'}</th>
+            <th style="text-align:center">${isAr ? 'وسيط الدرجة' : 'Median Score'}</th>
+            <th style="text-align:center">${isAr ? 'وسيط النمو' : 'Median Growth'}</th>
+            <th style="text-align:center">${isAr ? 'وسيط الهامش' : 'Median Margin'}</th>
             <th style="text-align:center">${isAr ? 'الأفضل' : 'Top Pick'}</th>
           </tr></thead>
           <tbody>${indTableHtml}</tbody>
@@ -6645,8 +6890,8 @@ function renderCompare(tickers) {
     const sec = allSectors[0];
     const secTickers = TICKERS.filter(t => STOCK[t]?.sector === sec && ANNUAL[t]?.length);
     const secScores = secTickers.map(t => calcScores(calcMetrics(ANNUAL[t])));
-    const avg = (arr, k) => { const v = arr.map(s => s[k]).filter(Boolean); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
-    sectorAvg = { sector: sec, count: secTickers.length, growth: avg(secScores, 'growth'), profitability: avg(secScores, 'profitability'), health: avg(secScores, 'health'), cashflow: avg(secScores, 'cashflow'), overall: avg(secScores, 'overall') };
+    const med = (arr, k) => median(arr.map(s => s[k]));
+    sectorAvg = { sector: sec, count: secTickers.length, growth: med(secScores, 'growth'), profitability: med(secScores, 'profitability'), health: med(secScores, 'health'), cashflow: med(secScores, 'cashflow'), overall: med(secScores, 'overall') };
   }
 
   // Score table with rankings and optional sector avg row
@@ -6698,7 +6943,7 @@ function renderCompare(tickers) {
     </tr>`;
   }).join('');
 
-  const sectorColHdr = sectorAvg ? `<th style="text-align:center;color:var(--text3);font-size:10px">${sectorAvg.sector}<br>${isAr?'متوسط':'Avg'} (${sectorAvg.count})</th>` : '';
+  const sectorColHdr = sectorAvg ? `<th style="text-align:center;color:var(--text3);font-size:10px">${sectorAvg.sector}<br>${isAr?'وسيط':'Median'} (${sectorAvg.count})</th>` : '';
 
   getMainTarget().innerHTML = `
   <div class="cmp-view">
@@ -6896,11 +7141,11 @@ function showLoadedState() {
 }
 
 // ── FMP API + IndexedDB CACHE ─────────────────────────────────────────────────
-const FMP_BASE = 'https://financialmodelingprep.com/stable';
+// FMP is only called through the fmp-proxy edge function. The API key stays
+// in the Supabase function secret and is never placed in a browser URL.
 const IDB_NAME = 'SmartFinAnalyzer';
 const IDB_VERSION = 1;
 const IDB_STORE = 'companies';
-let FMP_API_KEY = '';
 
 // IndexedDB helpers
 function openIDB() {
@@ -6948,25 +7193,32 @@ async function idbClear() {
 }
 
 // FMP API fetch helper with rate limiting
+// Browser calls never include the FMP key. The signed-in proxy adds it server-side.
 async function fmpFetch(endpoint, params, retries = 3) {
-  const qs = new URLSearchParams({ ...params, apikey: FMP_API_KEY }).toString();
-  const url = `${FMP_BASE}/${endpoint}?${qs}`;
+  if (!isAiReady()) throw new Error('Sign in required — FMP is called from the server');
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const res = await fetch(url);
+    const res = await fetch(getFmpProxyUrl(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'x-auth-hash': USER_AUTH_HASH,
+      },
+      body: JSON.stringify({ endpoint, params: params || {} }),
+    });
     if (res.status === 429) {
-      // Rate limited — wait and retry
       const wait = Math.min(5000 * (attempt + 1), 15000);
-      console.warn(`FMP 429 rate limit on ${endpoint}/${params.symbol}, waiting ${wait}ms (attempt ${attempt + 1})`);
+      console.warn(`FMP proxy 429 on ${endpoint}, waiting ${wait}ms (attempt ${attempt + 1})`);
       await new Promise(r => setTimeout(r, wait));
       continue;
     }
     if (!res.ok) {
-      if (attempt < retries) { await new Promise(r => setTimeout(r, 2000)); continue; }
-      throw new Error(`FMP ${res.status}: ${res.statusText}`);
+      if (attempt < retries && res.status >= 500) { await new Promise(r => setTimeout(r, 2000)); continue; }
+      throw new Error(`FMP proxy ${res.status}`);
     }
     return res.json();
   }
-  throw new Error(`FMP: max retries exceeded for ${endpoint}`);
+  throw new Error(`FMP proxy: max retries exceeded for ${endpoint}`);
 }
 
 // Field mapping: FMP → internal data model
@@ -7106,22 +7358,39 @@ function buildInternalFromFmp(companyData) {
       const entry = {
         year: yr, ticker: t,
         revenue: i.revenue ?? null,
-        net_income: i.net_income ?? null,
-        operating_income: i.operating_income ?? null,
+        cost_of_revenue: i.cost_of_revenue ?? null,
         gross_profit: i.gross_profit ?? null,
+        research_and_development: i.research_and_development ?? null,
+        sga: i.sga ?? null,
+        operating_income: i.operating_income ?? null,
         ebitda: i.ebitda ?? null,
         ebit: i.ebit ?? null,
-        eps_diluted: i.eps_diluted ?? null,
-        total_assets: b.total_assets ?? null,
-        total_liabilities: b.total_liabilities ?? null,
-        equity: b.equity ?? null,
-        total_debt: b.total_debt ?? null,
-        operating_cash_flow: c.operating_cash_flow ?? null,
-        capital_expenditures: c.capital_expenditures ?? null,
-        free_cash_flow: c.free_cash_flow ?? null,
         interest_expense: i.interest_expense ?? null,
         tax_provision: i.tax_provision ?? null,
+        net_income: i.net_income ?? null,
+        eps_diluted: i.eps_diluted ?? null,
         shares_diluted: i.shares_diluted ?? null,
+        cash: b.cash ?? null,
+        receivables: b.receivables ?? null,
+        inventory: b.inventory ?? null,
+        current_assets: b.current_assets ?? null,
+        net_ppe: b.net_ppe ?? null,
+        total_assets: b.total_assets ?? null,
+        current_liabilities: b.current_liabilities ?? null,
+        long_term_debt: b.long_term_debt ?? null,
+        total_debt: b.total_debt ?? null,
+        total_liabilities: b.total_liabilities ?? null,
+        retained_earnings: b.retained_earnings ?? null,
+        equity: b.equity ?? null,
+        operating_cash_flow: c.operating_cash_flow ?? null,
+        depreciation: c.depreciation ?? null,
+        stock_based_comp: c.stock_based_comp ?? null,
+        capital_expenditures: c.capital_expenditures ?? null,
+        investing_cash_flow: c.investing_cash_flow ?? null,
+        free_cash_flow: c.free_cash_flow ?? null,
+        dividends_paid: c.dividends_paid ?? null,
+        share_repurchase: c.share_repurchase ?? null,
+        financing_cash_flow: c.financing_cash_flow ?? null,
       };
       if (entry.revenue != null || entry.net_income != null) rows.push(entry);
     });
@@ -7188,11 +7457,17 @@ function setFmpStatus(type, msg) {
 
 // Main sync function
 async function startFmpSync() {
-  const key = document.getElementById('fmpKeyInput').value.trim();
-  if (!key) { setFmpStatus('err', 'Please enter your FMP API key'); return; }
-  FMP_API_KEY = key;
+  if (!isAiReady()) {
+    showPinModal();
+    if (document.getElementById('fmpStatus')) setFmpStatus('err', 'Sign in first. FMP is called on the server — the API key never reaches the browser.');
+    return;
+  }
+  const keyEl = document.getElementById('fmpKeyInput');
+  if (keyEl) keyEl.value = '';
 
-  const tickerInput = document.getElementById('fmpTickersInput').value.trim();
+  const tickerInputEl = document.getElementById('fmpTickersInput');
+  if (!tickerInputEl) { console.warn('FMP sync UI is not on this page. Use Refresh in the sidebar (server-side key).'); return; }
+  const tickerInput = tickerInputEl.value.trim();
   let tickers;
   if (tickerInput) {
     tickers = tickerInput.split(/[,\s\n]+/).map(t => t.trim().toUpperCase()).filter(Boolean);
@@ -7398,8 +7673,10 @@ function updateStockBarWithLive(ticker, quote) {
   if (stk) {
     stk.price = quote.price;
     stk.marketCap = quote.marketCap;
-    if (quote.change != null) stk.change = quote.change;
-    if (quote.changePct != null) stk.changePct = quote.changePct;
+    const chg = coerceNum(quote.change);
+    const chgPct = coerceNum(quote.changePct);
+    if (chg != null) stk.change = chg;
+    if (chgPct != null) stk.changePct = chgPct;
     if (quote.pe) stk.pe = quote.pe;
     if (quote.yearLow) stk.fiftyTwoWeekLow = quote.yearLow;
     if (quote.yearHigh) stk.fiftyTwoWeekHigh = quote.yearHigh;
@@ -7415,10 +7692,16 @@ function updateStockBarWithLive(ticker, quote) {
   const rangeBar = document.getElementById('liveRangeBar');
 
   if (priceEl && quote.price != null) priceEl.textContent = '$' + quote.price.toFixed(2);
-  if (changeEl && quote.change != null && quote.changePct != null) {
-    const up = quote.change >= 0;
-    changeEl.textContent = `${up ? '+' : ''}${quote.change.toFixed(2)} (${up ? '+' : ''}${quote.changePct.toFixed(2)}%)`;
-    changeEl.className = `sb-change ${up ? 'up' : 'down'}`;
+  if (changeEl) {
+    const next = document.createElement('div');
+    next.innerHTML = dayChangeInner(quote.change, quote.changePct);
+    const span = next.firstElementChild;
+    if (span) {
+      changeEl.className = span.className;
+      changeEl.textContent = span.textContent;
+      if (span.title) changeEl.title = span.title;
+      else changeEl.removeAttribute('title');
+    }
   }
   if (mcapEl && quote.marketCap != null) mcapEl.textContent = fM(quote.marketCap);
   if (peEl && quote.pe) peEl.textContent = quote.pe.toFixed(1) + 'x';
@@ -7663,12 +7946,77 @@ async function loadPriceChart(ticker, range) {
 
 // ── LIVE NEWS (FMP News API) ──────────────────────────────────────────────────
 async function fetchLiveNews(ticker) {
-  if (!isAiReady()) return [];
+  if (!isAiReady()) {
+    const err = new Error('auth');
+    err.code = 'auth';
+    throw err;
+  }
+  const data = await fmpProxyGet('news/stock', { symbols: ticker, limit: 8 });
+  if (!Array.isArray(data)) {
+    const err = new Error(data?.error || data?.['Error Message'] || 'News unavailable');
+    err.code = 'error';
+    throw err;
+  }
+  return data;
+}
+
+function newsStateHtml(kind) {
+  const isAr = lang === 'ar';
+  if (kind === 'auth') {
+    return `<div class="news-state">
+      <div class="news-state-title">${isAr ? 'سجّل الدخول لعرض الأخبار' : 'Sign in to load the latest headlines'}</div>
+      <div class="news-state-sub">${isAr ? 'الأخبار تُجلب عبر الخادم بعد تسجيل الدخول.' : 'Headlines are loaded through the server after you sign in.'}</div>
+      <button type="button" class="act-btn" onclick="showPinModal()">${isAr ? 'تسجيل الدخول' : 'Sign in'}</button>
+    </div>`;
+  }
+  if (kind === 'empty') {
+    return `<div class="news-state"><div class="news-state-title">${isAr ? 'لا توجد أخبار حديثة' : 'No recent headlines'}</div><div class="news-state-sub">${isAr ? 'لا يوجد خبر متاح لهذه الشركة حالياً.' : 'Nothing came back for this company.'}</div></div>`;
+  }
+  return `<div class="news-state">
+    <div class="news-state-title">${isAr ? 'تعذّر تحميل الأخبار' : 'Couldn’t load news'}</div>
+    <div class="news-state-sub">${isAr ? 'تحقق من الاتصال أو أعد المحاولة. قد تكون خدمة البيانات غير متاحة.' : 'Check your connection and try again. The data provider may be unavailable.'}</div>
+    <button type="button" class="act-btn" onclick="loadCompanyNews(activeTicker)">${isAr ? 'إعادة المحاولة' : 'Retry'}</button>
+  </div>`;
+}
+
+async function loadCompanyNews(ticker) {
+  const el = document.getElementById('newsFeed');
+  if (!el) return;
+  const isAr = lang === 'ar';
+  if (!isAiReady()) {
+    el.innerHTML = newsStateHtml('auth');
+    return;
+  }
+  el.innerHTML = `<div class="news-loading">${isAr ? 'جار تحميل الأخبار...' : 'Loading news...'}</div>`;
+  let news;
   try {
-    return (await fmpProxyGet('news/stock', { symbols: ticker, limit: 5 })) || [];
+    news = await Promise.race([
+      fetchLiveNews(ticker),
+      new Promise((_, rej) => setTimeout(() => {
+        const err = new Error('timeout');
+        err.code = 'error';
+        rej(err);
+      }, 12000)),
+    ]);
   } catch (e) {
-    console.warn('News fetch failed for', ticker, e);
-    return [];
+    const host = document.getElementById('newsFeed');
+    if (!host || activeTicker !== ticker) return;
+    host.innerHTML = newsStateHtml(e?.code === 'auth' ? 'auth' : 'error');
+    return;
+  }
+  if (activeTicker !== ticker || !document.getElementById('newsFeed')) return;
+  if (!news.length) { renderNewsSection([]); return; }
+  renderNewsSection(news.map(n => ({ ...n, sentiment: 'unknown', sentimentScore: 0 })));
+  try {
+    const scored = await analyseNewsSentiment(news, ticker);
+    if (activeTicker === ticker) {
+      renderNewsSection(scored);
+      if (agentMemory[ticker]) {
+        agentMemory[ticker].sentiment = scored.reduce((s, n) => s + (n.sentimentScore || 0), 0);
+      }
+    }
+  } catch (e) {
+    console.warn('News sentiment scoring failed (news still shown):', e);
   }
 }
 
@@ -7848,7 +8196,7 @@ Format: [{"i":1,"s":"bullish"},{"i":2,"s":"neutral"}]`;
 function renderNewsSection(news) {
   const el = document.getElementById('newsFeed');
   if (!el) return;
-  if (!news || !news.length) { el.innerHTML = `<div class="news-loading">${lang==='ar'?'لا توجد أخبار متاحة':'No recent news available'}</div>`; return; }
+  if (!news || !news.length) { el.innerHTML = newsStateHtml('empty'); return; }
 
   const isAr = lang === 'ar';
 
@@ -8102,11 +8450,21 @@ const SUPABASE_URL = 'https://xszfkutbbmavzicvhvgu.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhzemZrdXRiYm1hdnppY3Zodmd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MTgxNzAsImV4cCI6MjA5Mzk5NDE3MH0.9TrQJrb1bvpFCBY_bUSu3uhWXRWn22A0I8clvGiYJ3Y';
 let supabaseClient = null;
 
+let _sbAuthHash = null;
 function getSupabase() {
-  if (!supabaseClient && SUPABASE_URL && SUPABASE_ANON_KEY) {
-    const creator = (window.supabase && window.supabase.createClient) || (typeof supabase !== 'undefined' && supabase.createClient);
-    if (!creator) return null;
-    supabaseClient = creator(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  const creator = (window.supabase && window.supabase.createClient) || (typeof supabase !== 'undefined' && supabase.createClient);
+  if (!creator) return null;
+  // Recreate when the password hash changes so private-table requests carry
+  // x-auth-hash. RLS (migration 007) checks that header. Public reads still work
+  // with no hash.
+  const hash = USER_AUTH_HASH || '';
+  if (!supabaseClient || _sbAuthHash !== hash) {
+    supabaseClient = creator(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { headers: hash ? { 'x-auth-hash': hash } : {} },
+    });
+    _sbAuthHash = hash;
   }
   return supabaseClient;
 }
@@ -8161,30 +8519,66 @@ async function syncNewTickers(input) {
   }
 }
 
+// DB row → the in-memory annual shape the statements view and metrics share.
+function shapeAnnualFromDb(r, ticker) {
+  return {
+    year: r.fiscal_year, ticker,
+    revenue: r.revenue ?? null,
+    cost_of_revenue: r.cost_of_revenue ?? null,
+    gross_profit: r.gross_profit ?? null,
+    research_and_development: r.research_and_development ?? null,
+    sga: r.sga ?? null,
+    operating_income: r.operating_income ?? null,
+    ebitda: r.ebitda ?? null,
+    ebit: r.ebit ?? null,
+    interest_expense: r.interest_expense ?? null,
+    tax_provision: r.tax_provision ?? null,
+    net_income: r.net_income ?? null,
+    eps_diluted: r.eps_diluted ?? null,
+    shares_diluted: r.shares_diluted ?? null,
+    cash: r.cash ?? null,
+    receivables: r.receivables ?? null,
+    inventory: r.inventory ?? null,
+    current_assets: r.current_assets ?? null,
+    net_ppe: r.net_ppe ?? null,
+    total_assets: r.total_assets ?? null,
+    current_liabilities: r.current_liabilities ?? null,
+    long_term_debt: r.long_term_debt ?? null,
+    total_debt: r.total_debt ?? null,
+    total_liabilities: r.total_liabilities ?? null,
+    retained_earnings: r.retained_earnings ?? null,
+    equity: r.equity ?? null,
+    operating_cash_flow: r.operating_cash_flow ?? null,
+    depreciation: r.depreciation ?? null,
+    stock_based_comp: r.stock_based_comp ?? null,
+    capital_expenditures: r.capital_expenditures ?? null,
+    investing_cash_flow: r.investing_cash_flow ?? null,
+    free_cash_flow: r.free_cash_flow ?? null,
+    dividends_paid: r.dividends_paid ?? null,
+    share_repurchase: r.share_repurchase ?? null,
+    financing_cash_flow: r.financing_cash_flow ?? null,
+  };
+}
+
+function shapeQuarterlyFromDb(r) {
+  return {
+    date: r.fiscal_date, period: r.period || null,
+    revenue: r.revenue ?? null, net_income: r.net_income ?? null,
+    operating_income: r.operating_income ?? null, gross_profit: r.gross_profit ?? null,
+    eps_diluted: r.eps_diluted ?? null, operating_cash_flow: r.operating_cash_flow ?? null,
+    free_cash_flow: r.free_cash_flow ?? null,
+  };
+}
+
 // Merge a single synced ticker's data into the live STOCK/ANNUAL/QUARTERLY/ESTIMATES/TICKERS arrays
 function mergeTickerLocally(item) {
   if (!item?.ticker) return;
   const t = item.ticker;
   // Annual: convert DB column names to in-memory format used by calcMetrics
-  ANNUAL[t] = (item.annual || []).map(r => ({
-    year: r.fiscal_year, ticker: t,
-    revenue: r.revenue, net_income: r.net_income, operating_income: r.operating_income,
-    gross_profit: r.gross_profit, ebitda: r.ebitda, ebit: r.ebit,
-    eps_diluted: r.eps_diluted, total_assets: r.total_assets,
-    total_liabilities: r.total_liabilities, equity: r.equity,
-    total_debt: r.total_debt, operating_cash_flow: r.operating_cash_flow,
-    capital_expenditures: r.capital_expenditures, free_cash_flow: r.free_cash_flow,
-    interest_expense: r.interest_expense, tax_provision: r.tax_provision,
-    shares_diluted: r.shares_diluted,
-  })).sort((a, b) => a.year - b.year);
+  ANNUAL[t] = (item.annual || []).map(r => shapeAnnualFromDb(r, t)).sort((a, b) => a.year - b.year);
 
   // Quarterly
-  QUARTERLY[t] = (item.quarterly || []).map(r => ({
-    date: r.fiscal_date, revenue: r.revenue, net_income: r.net_income,
-    operating_income: r.operating_income, gross_profit: r.gross_profit,
-    eps_diluted: r.eps_diluted, operating_cash_flow: r.operating_cash_flow,
-    free_cash_flow: r.free_cash_flow,
-  }));
+  QUARTERLY[t] = (item.quarterly || []).map(r => shapeQuarterlyFromDb(r));
 
   // Estimates (only if ESTIMATES global exists)
   if (typeof ESTIMATES !== 'undefined' && item.estimates) {
@@ -8209,6 +8603,7 @@ function mergeTickerLocally(item) {
       dividendYield: p.last_dividend && p.price ? (p.last_dividend / p.price) : null,
     };
     if (s.price && latestAnnual?.eps_diluted) s.pe = s.price / latestAnnual.eps_diluted;
+    if (latestAnnual?.current_assets && latestAnnual?.current_liabilities) s.currentRatio = latestAnnual.current_assets / latestAnnual.current_liabilities;
     STOCK[t] = s;
   }
 
@@ -8412,27 +8807,12 @@ async function loadFromSupabase() {
 
     (annuals || []).forEach(r => {
       if (!annual[r.symbol]) annual[r.symbol] = [];
-      annual[r.symbol].push({
-        year: r.fiscal_year, ticker: r.symbol,
-        revenue: r.revenue, net_income: r.net_income, operating_income: r.operating_income,
-        gross_profit: r.gross_profit, ebitda: r.ebitda, ebit: r.ebit,
-        eps_diluted: r.eps_diluted, total_assets: r.total_assets,
-        total_liabilities: r.total_liabilities, equity: r.equity,
-        total_debt: r.total_debt, operating_cash_flow: r.operating_cash_flow,
-        capital_expenditures: r.capital_expenditures, free_cash_flow: r.free_cash_flow,
-        interest_expense: r.interest_expense, tax_provision: r.tax_provision,
-        shares_diluted: r.shares_diluted,
-      });
+      annual[r.symbol].push(shapeAnnualFromDb(r, r.symbol));
     });
 
     (quarters || []).forEach(r => {
       if (!quarterly[r.symbol]) quarterly[r.symbol] = [];
-      quarterly[r.symbol].push({
-        date: r.fiscal_date, revenue: r.revenue, net_income: r.net_income,
-        operating_income: r.operating_income, gross_profit: r.gross_profit,
-        eps_diluted: r.eps_diluted, operating_cash_flow: r.operating_cash_flow,
-        free_cash_flow: r.free_cash_flow,
-      });
+      quarterly[r.symbol].push(shapeQuarterlyFromDb(r));
     });
 
     // Group estimates by symbol
@@ -8461,7 +8841,7 @@ async function loadFromSupabase() {
       if (s.price && latestAnnual?.eps_diluted) s.pe = s.price / latestAnnual.eps_diluted;
       if (latestAnnual?.net_income && latestAnnual?.equity && latestAnnual.equity > 0) s.roe = latestAnnual.net_income / latestAnnual.equity;
       if (latestAnnual?.net_income && latestAnnual?.total_assets && latestAnnual.total_assets > 0) s.roa = latestAnnual.net_income / latestAnnual.total_assets;
-      if (latestAnnual?.current_assets && latestAnnual?.total_liabilities) s.currentRatio = latestAnnual.current_assets / (latestAnnual.total_liabilities || 1);
+      if (latestAnnual?.current_assets && latestAnnual?.current_liabilities) s.currentRatio = latestAnnual.current_assets / latestAnnual.current_liabilities;
       stock[t] = s;
     });
 
@@ -8528,9 +8908,6 @@ function showDataSourcePage(tab) {
     if (input && !input.value.trim()) {
       input.placeholder = `Currently cached: ${TICKERS.length} tickers (${TICKERS.slice(0, 10).join(', ')}${TICKERS.length > 10 ? '...' : ''})\nEnter tickers to add or re-sync.`;
     }
-    // Restore API key if we have it
-    const keyInput = document.getElementById('fmpKeyInput');
-    if (keyInput && FMP_API_KEY && !keyInput.value) keyInput.value = FMP_API_KEY;
   }
 
   // Clear active ticker state
@@ -8559,12 +8936,13 @@ function showPinModal() {
   overlay.id = 'pinOverlay';
   overlay.className = 'pin-overlay';
   overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
-  overlay.innerHTML = `<div class="pin-card">
+  overlay.innerHTML = `<div class="pin-card" role="dialog" aria-modal="true">
+    <button type="button" class="pin-close" onclick="document.getElementById('pinOverlay')?.remove()" aria-label="${isAr ? 'إغلاق' : 'Close'}">✕</button>
     <h2>${isLoggedIn ? (isAr ? '✓ تم تسجيل الدخول' : '✓ Signed In') : (isAr ? '🔐 تسجيل الدخول' : '🔐 Sign In')}</h2>
     <p>${isLoggedIn
       ? (isAr ? 'أنت مسجل الدخول. بياناتك محفوظة ومتزامنة.' : 'You are signed in. Your data is saved and synced.')
       : (isAr ? 'أدخل كلمة المرور للوصول إلى التحليل الذكي والذاكرة.' : 'Enter the password to access AI analysis and synced memory.')}</p>
-    ${isLoggedIn ? '' : `<input class="pin-input" id="pinInput" type="password" placeholder="${isAr ? 'كلمة المرور' : 'Password'}" onkeydown="if(event.key==='Enter')submitPassword()"/>
+    ${isLoggedIn ? '' : `<input class="pin-input" id="pinInput" type="password" placeholder="${isAr ? 'كلمة المرور' : 'Password'}" onkeydown="if(event.key==='Enter')submitPassword(); if(event.key==='Escape')document.getElementById('pinOverlay')?.remove()"/>
     <button class="pin-submit" onclick="submitPassword()">${isAr ? 'دخول' : 'Sign In'}</button>`}
     ${isLoggedIn ? `<button class="pin-submit" style="background:var(--red)" onclick="signOut()">${isAr ? 'تسجيل خروج' : 'Sign Out'}</button>` : ''}
     <div id="pinStatus"></div>
@@ -8619,6 +8997,7 @@ function signOut() {
   agentMemory = {};
   watchlist = [];
   try { localStorage.removeItem('sfa_auth_hash'); } catch(e) {}
+  getSupabase();
   renderWatchlistPanel();
   updateMemoryBadge();
   const overlay = document.getElementById('pinOverlay');
@@ -8721,10 +9100,10 @@ buildSidebar();
   if (SUPABASE_URL && SUPABASE_ANON_KEY) {
     const loaded = await loadFromSupabase().catch(e => { console.error('Init error:', e); return false; });
     if (loaded) {
-      // Show login modal on first visit (not signed in)
-      if (!USER_AUTH_HASH) {
-        setTimeout(() => showPinModal(), 1500);
-      }
+      // Don't pop the password modal on load. It used to appear ~1.5s after
+      // the data arrived, including while the user was typing in search, and
+      // its full-screen backdrop swallowed the next click. Sign-in stays on
+      // the header button and on actions that actually need it.
       return;
     }
   }
